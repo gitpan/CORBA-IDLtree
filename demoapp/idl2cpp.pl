@@ -561,7 +561,7 @@ foreach $arg (@ARGV) {
     print OUT "#ifndef $hfence\n";
     print OUT "#define $hfence\n\n";
     print OUT "#include <string.h>\n";
-    print OUT "#include \"corbaport.h\"\n\n";
+    print OUT "#include <p_orb.h>   // CORBA definitions\n\n";
     idl2cpp $idltree;
     print OUT "#endif  // $hfence\n\n";
     close OUT;

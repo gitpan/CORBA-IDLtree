@@ -229,8 +229,12 @@ module test {
 	};
 
 	union BooleanUnion switch(boolean) {
-	case 0: VariableLengthStruct x;
-	case 1: string y;
+	// case 0:  This is not good, let's try stronger typing:
+        case FALSE:
+	        VariableLengthStruct x;
+	// case 1:  This is not good, let's try stronger typing:
+	case TRUE:
+		string y;
 	};
 
 	typedef string StrArray2[20];

@@ -6,6 +6,14 @@
 # -----------------------------------------------------------------------------
 # Ver. |   Date   | History
 # -----+----------+------------------------------------------------------------
+#  1.3  2002/12/01  #include statements that appear at places other than
+#                   the global scope are no longer made into INCFILE nodes;
+#                   instead, the included file is parsed inline.
+#                   The SCOPEREF of declarations immediately inside an INCFILE
+#                   now point to the INCFILE. This change makes possible the
+#                   reopening of modules.
+#                   Support self-referential valuetype definition, i.e.
+#                   state members that are of the type currently being defined.
 #  1.2  2002/07/08  Added a further element to the node structure: COMMENT
 #                   (see below for details.)
 #                   Added user-level utilities is_a and root_type.
@@ -18,7 +26,7 @@
 #                   In the interest of IDL conformance, changed the scope
 #                   separator used internally to "::". (This separator
 #                   may appear at union CASE designators and in CONST
-#                   expressions.)
+#                   and array dimension expressions.)
 #                   Removed the LANG constants, and removed support for
 #                   languages other than IDL in sub typeof.
 #                   Corrected parsing of valuetype boxes.
@@ -90,7 +98,7 @@
 #                   references. In order to generate a "Ref" for those (in
 #                   Ada), it is necessary to distinguish them from other
 #                   types (the Ada type name is different from the IDL type
-#                   name.) This single requirement lead to the abandonment
+#                   name.) This single requirement led to the abandonment
 #                   of the direct text-to-text transformation approach.
 #                   Instead, IDL source text is first translated into a
 #                   target language independent intermediate representation
@@ -102,7 +110,6 @@
 
 package CORBA::IDLtree;
 require Exporter;
-use Text::Tabs;
 @ISA = ('Exporter');
 @EXPORT = ();
 @EXPORT_OK = ();  # &Parse_File, &Dump_Symbols, and all the constants subs
@@ -118,11 +125,12 @@ use strict 'vars';
 # A "thing" in the symbol tree can be either a reference to a node, or a
 # reference to an array of references to nodes.
 #
-# Each node is a four-element array with the elements
+# Each node is a five-element array with the elements
 #   [0] => TYPE (MODULE|INTERFACE|STRUCT|UNION|ENUM|TYPEDEF|CHAR|...)
 #   [1] => NAME
 #   [2] => SUBORDINATES
-#   [3] => SCOPEREF
+#   [3] => COMMENT
+#   [4] => SCOPEREF
 #
 # The TYPE element, instead of holding a type ID number (see the following
 # list under SUBORDINATES), can also be a reference to the node defining the
@@ -218,9 +226,9 @@ use strict 'vars';
 #   VALUETYPE_BOX   Reference to the defining type node.
 #
 #   VALUETYPE_FWD   Subordinates unused.
-#                   
+#
 #   NATIVE          Subordinates unused.
-#                   
+#
 #   ATTRIBUTE       Reference to a two-element array; element 0 is the read-
 #                   only flag (0 for read/write attributes), element 1 is a
 #                   type descriptor of the attribute's type.
@@ -254,7 +262,7 @@ use strict 'vars';
 #                   the pragma name, if any.
 #
 #
-# The COMMENT element holds the comment text that precedes an IDL item
+# The COMMENT element holds the comment text that precedes an IDL item,
 # or appears on the same line as the IDL item.
 # Note that comments that relate to an IDL item, but appear on lines
 # *after* the IDL item, are not handled correctly: They are associated with
@@ -265,7 +273,7 @@ use strict 'vars';
 # reference to this list, or contains the value 0 if no comment is present
 # at the IDL item.
 #
-# The SCOPEREF element is a reference back to the node of the module or 
+# The SCOPEREF element is a reference back to the node of the module or
 # interface enclosing the current node. If the current node is already
 # at the global scope level, then the SCOPEREF is 0. All nodes have this
 # element except for the parameter nodes of methods and the component nodes
@@ -286,9 +294,19 @@ sub Parse_File;
 @include_path = ();     # Paths where to look for included IDL files
 %defines = ();          # Symbol definitions for preprocessor
 
+my %active_defines = ();
+
+
 sub Dump_Symbols;
     # Symbol tree dumper (for debugging etc.)
 
+sub Version ()
+{
+    for ('$Revision: 1.60 $') { #'){
+        /: *(\S+)/ and return $1;
+    }
+    return "(undefined)";
+}
 
 # Visible constants ###########################################################
 
@@ -357,17 +375,6 @@ sub PRAGMA_VERSION ()  { 45 }  # node
 sub PRAGMA_ID ()       { 46 }  # node
 sub PRAGMA ()          { 47 }  # node
 sub NUMBER_OF_TYPES () { 48 }
-# The @predef_types array must have the types in the same order as
-# the numeric order of type identifying constants defined above.
-my @predef_types = qw/ none boolean octet char wchar short long long_long 
-                       unsigned_short unsigned_long unsigned_long_long
-                       float double long_double string wstring Object 
-                       TypeCode any fixed bounded_string bounded_wstring
-                       sequence enum typedef native struct union case default
-                       exception const module interface interface_fwd 
-                       valuetype valuetype_fwd valuetype_box
-                       attribute oneway void factory method 
-                       include pragma_prefix pragma_version pragma_id pragma /;
 
 # Valuetype flag values
 sub ABSTRACT      { 1 }
@@ -401,10 +408,16 @@ sub use_system_preprocessor;  # Attempt to use the system preprocessor if
                               #  preprocessing itself.
 sub set_verbose;              # Parser tells us what it's doing.
 
-# Useful User Utilities:
-sub is_a;  # Determine if typeid is of given type, recursing through TYPEDEFs.
-sub root_type; # Get the original type of a TYPEDEF, i.e. recurse through
-               # all non-array TYPEDEFs until the original type is reached.
+sub is_a;                # Determine if typeid is of given type,
+                         #  recursing through TYPEDEFs.
+                         #  Not used internally.
+sub root_type;           # Get the original type of a TYPEDEF, i.e.
+                         #  recurse through all non-array TYPEDEFs until
+                         #  the original type is reached.
+                         #  Not used internally.
+sub files_included;      # Returns an array with the names of files #included.
+                         #  Not used internally.
+
 
 # Internal subroutines (should not be visible)
 
@@ -412,17 +425,32 @@ sub getline;
 sub is_valid_identifier;
 sub check_name;
 sub curr_scope;
+sub scope_names;
+sub find_node_i;
 sub parse_sequence;
 sub parse_type;
 sub parse_members;
 sub error;
+sub abort;
 sub cvt_expr;
 sub require_end_of_stmt;
 sub idlsplit;
+sub get_files_included;
 sub dump_symbols_internal;
 
 # Auxiliary (non-visible) global stuff ########################################
 
+# The @predef_types array must have the types in the same order as
+# the numeric order of type identifying constants defined above.
+my @predef_types = qw/ none boolean octet char wchar short long long_long 
+                       unsigned_short unsigned_long unsigned_long_long
+                       float double long_double string wstring Object 
+                       TypeCode any fixed bounded_string bounded_wstring
+                       sequence enum typedef native struct union case default
+                       exception const module interface interface_fwd 
+                       valuetype valuetype_fwd valuetype_box
+                       attribute oneway void factory method 
+                       include pragma_prefix pragma_version pragma_id pragma /;
 my @infilename = ();    # infilename and line_number move in parallel.
 my @line_number = ();
 my $n_errors = 0;       # auxiliary to sub error
@@ -458,20 +486,17 @@ sub getline {  # returns empty string for end-of-file or fatal error
     my $line = "";
     my $first = 1;
     my $l;
-    my $seen_empty_line = 0;
     @comment = ();
     while (($l = <$in>)) {
         $line_number[$currfile]++;
         chomp $l;
         if ($l =~ /^\s*$/) {           # empty
-            $seen_empty_line = 1;
             if ($in_comment) {
                push @comment, "";
             }
             next;
         }
-        $l = Text::Tabs::expand($l);
-        if ($l =~ /^\s*\/\/ *(.*)/) {        # single-line comment
+        if ($l =~ /^\s*\/\/\s*(.*)/) {        # single-line comment
             my $cmnt = $1;
             if ($cmnt) {
                 push @comment, $cmnt;
@@ -482,13 +507,18 @@ sub getline {  # returns empty string for end-of-file or fatal error
             if ($l =~ /\/\*/) {
                 error "nested comments not supported!";
             }
-            my $cmnt = $l;
-            $cmnt =~ s/\*\/.*$//;
-            push @comment, $cmnt;
-            next unless ($l =~ /\*\//);
-            $in_comment = 0;     # end of multi-line comment
-            $l =~ s/^.*\*\///;
-            next if ($l =~ /^\s*$/);
+            my $endindex = index($l, '*/');
+            if ($endindex >= 0) {
+                my $cmnt = $l;
+                $cmnt =~ s/\*\/.*$//;
+                push @comment, $cmnt;
+                $in_comment = 0;     # end of multi-line comment
+                $l =~ s/^.*\*\///;
+                next if ($l =~ /^\s*$/);
+            } else {
+                push @comment, $l;
+                next;
+            }
         } elsif ($l =~ /\/\*/) {       # start of multi-line comment
             my $cmnt = $l;
             $cmnt =~ s/^.*\/\*//;  # remove comment beginning /*
@@ -504,7 +534,7 @@ sub getline {  # returns empty string for end-of-file or fatal error
             }
             next if ($l =~ /^\s*$/);
         }
-        if ($l =~ /\/\/ *(.*)$/) {
+        if ($l =~ /\/\/\s*(.*)$/) {
             my $cmnt = $1;
             if ($cmnt) {
                 push @comment, $cmnt;
@@ -520,15 +550,12 @@ sub getline {  # returns empty string for end-of-file or fatal error
         }
         $line .= $l;
         last if ($line =~ /^#/);   # preprocessor directive
-        last if ($line =~ /[;"\{]$/);
+        last if ($line =~ /[;"\{]$/); #"
         if ($line =~ /:$/) {
             last;
         }
     }
-    if (! $l) {
-        print("eof seen\n") if ($verbose);
-    }
-    if ($in_comment) {
+    if (! $l && $in_comment) {
         error "end of file reached while comment still open";
         $in_comment = 0;
     }
@@ -572,8 +599,8 @@ sub idlsplit {
             $in_lit = 0;
             if ($emucpp) {
                 # do preprocessor substitution
-                if (exists $defines{$out[$ondx]}) {
-                    $out[$ondx] = $defines{$out[$ondx]};
+                if (exists $active_defines{$out[$ondx]}) {
+                    $out[$ondx] = $active_defines{$out[$ondx]};
                 }
             }
             if ($ch !~ /\s/) {
@@ -721,7 +748,7 @@ sub parse_sequence {
     my $nxtarg = shift @{$argref};
     my $type = predef_type $nxtarg;
     if (! $type) {
-        $type = find_node($nxtarg, $symroot);
+        $type = find_node_i($nxtarg, $symroot);
         if (! $type) {
             error "unknown sequence type";
             return 0;
@@ -781,7 +808,7 @@ sub parse_type {
         $t = ($1 eq "wstring" ? BOUNDED_WSTRING : BOUNDED_STRING);
         my $bound = $2;
         if ($bound !~ /^\d/) {
-            my $boundtype = find_node($bound, $symtreeref);
+            my $boundtype = find_node_i($bound, $symtreeref);
             if (isnode $boundtype) {
                 my @node = @{$boundtype};
                 if ($node[TYPE] == CONST) {
@@ -803,7 +830,7 @@ sub parse_type {
     } elsif ($typename eq 'sequence') {
         $type = parse_sequence($argref, $symtreeref);
     } else {
-        $type = find_node($typename, $symtreeref);
+        $type = find_node_i($typename, $symtreeref);
     }
     $type;
 }
@@ -857,7 +884,7 @@ sub parse_members {
             while (@arg) {    # We're here for a variable's DIMENSIONS
                 $nxtarg = shift @arg;
                 if ($nxtarg eq '[') {
-                    my $dim = check_name(shift @arg, "dimension");
+                    my $dim = shift @arg;
                     if (shift @arg ne ']') {
                         error "expecting ']'";
                         return -1;
@@ -894,7 +921,7 @@ sub parse_members {
 
 my @prev_symroots = ();
     # Stack of the roots of previously constructed symtrees.
-    # Used by find_node() for identifying symbols.
+    # Used by find_node_i() for identifying symbols.
     # Elements are added to/removed from the front of this,
     # i.e. using unshift/shift (as opposed to push/pop.)
 
@@ -903,6 +930,11 @@ my @fh = qw/ IN0 IN1 IN2 IN3 IN4 IN5 IN6 IN7 IN8 IN9/;
 
 my %includetree = ();   # Roots of previously parsed includefiles
 my $did_emucppmsg = 0;  # auxiliary to sub emucppmsg
+
+my @struct = ();       # temporary storage for struct/union/exception
+my @typestack = ();    # For struct/union/exception, typestack, namestack, and
+my @namestack = ();    # cmntstack move in parallel. For valuetypes, only
+my @cmntstack = ();    # @typestack is used.
 
 sub set_verbose {
     if (@_) {
@@ -958,32 +990,111 @@ sub isname {
     $txt =~ /^[A-Za-z]/
 }
 
-sub Parse_File {
-    my $file = shift;
-    my $input_filehandle = "";
-    if (@_) {
-        $input_filehandle = shift;   # internal use only
+sub check_union_case {
+    my ($known_cases, $case) = @_;
+
+    my $i = 0;
+    if ($case->[0] == DEFAULT) {
+        foreach (@$known_cases) {
+            next if $i++ == 0;
+            if ($_->[0] == DEFAULT) {
+                error "duplicate default label";
+                return 1;
+            }
+        }
+    } else {
+        my $type = root_type($known_cases->[0]);
+        if (is_a($type, ENUM)) {
+            # check if value is part of enumeration
+            # (ignores scope for now...)
+            foreach my $c (@{$case->[2]}) {
+                my $e = (split "::", $c)[-1];
+                my $found = 0;
+                foreach (@{$type->[SUBORDINATES]}) {
+                    $found = 1, last if $_ eq $e;
+                }
+                unless ($found) {
+                    error "invalid case value $c";
+                    return 1;
+                }
+            }
+        } elsif (is_a($type, BOOLEAN)) {
+            foreach my $c (@{$case->[2]}) {
+                unless ($c eq "TRUE" || $c eq "FALSE") {
+                    error "invalid case value $c";
+                    return 1;
+                }
+            }
+        } elsif (is_a($type, CHAR)) {
+            foreach my $c (@{$case->[2]}) {
+                unless ($c =~ /^'.*'$/ || $c =~ /^\d+$/) {
+                    error "invalid case value $c";
+                    return 1;
+                }
+            }
+        } else {
+            # must be integer
+            foreach my $c (@{$case->[2]}) {
+                unless ($c =~ /^[-+]?\d+$/) {
+                    error "invalid case value $c";
+                    return 1;
+                }
+            }
+        }
+        foreach (@$known_cases) {
+            next if $i++ == 0;
+            next unless $_->[0] == CASE;
+            foreach (@{$_->[2]}) {
+                foreach my $c (@{$case->[2]}) {
+                    if ($c eq $_) {
+                        error "duplicate case label $c";
+                        return 1;
+                    }
+                }
+            }
+        }
     }
+    return 0;
+}
+
+sub Parse_File {
+    @infilename = ();    # infilename and line_number move in parallel.
+    @line_number = ();
+    $n_errors = 0;       # auxiliary to sub error
+    @comment = ();       # Auxiliary to comment processing
+    $in_comment = 0;     # Auxiliary to multi-line comment processing
+    $in_valuetype = 0;   # Auxiliary to valuetype processing
+    $abstract = 0;
+    $currfile = -1;
+    %includetree = ();   # Roots of previously parsed includefiles
+    $did_emucppmsg = 0;  # auxiliary to sub emucppmsg
+    @scopestack = ();
+    @prev_symroots = ();
+    %active_defines = %defines;
+    Parse_File_i(@_);
+}
+
+sub Parse_File_i {
+    my ($file, $input_filehandle, $symb) = @_;
+
+#    my $file = shift;
+#    my $input_filehandle = "";
+#    if (@_) {
+#        $input_filehandle = shift;   # internal use only
+#    }
+
     my @vt_inheritance = (0, 0);
     my $in;
     my $custom = 0;
     $abstract = 0;
     if ($file) {        # Process a new file (or includefile if cpp emulated)
+        -e "$file" or abort("Cannot find file $file");
+        # remove "//" from filename to ensure correct filename match
+        $file =~ s:/+:/:g;
         push @infilename, $file;
+        push @line_number, 0;
         $currfile = $#infilename;
         $in = $fh[$currfile];
-        my $found = 1;
-        if (not -e "$file") {
-            $found = 0;
-            foreach (@include_path) {
-                if (-e "$_/$file") {
-                    $file = "$_/$file";
-                    $found = 1;
-                    last;
-                }
-            }
-        }
-        $found or die "Cannot find file $file\n";
         my $cppcmd = "";
         unless ($emucpp) {
             # Try to find and run the C preprocessor.
@@ -998,7 +1109,7 @@ sub Parse_File {
             }
         }
         if ($emucpp) {
-            open($in, $file) or die "Cannot open file $file\n";
+            open($in, $file) or abort("Cannot open file $file");
         } else {
             my $cpp_args = "";
             foreach (keys %defines) {
@@ -1008,7 +1119,7 @@ sub Parse_File {
                 $cpp_args .= " -I$_";
             }
             open($in, "$cppcmd $cpp_args $file |")
-                 or die "Cannot open file $file\n";
+                 or abort("Cannot open file $file");
         }
         print("// processing: $file\n") if ($verbose);
     } elsif ("$input_filehandle") {
@@ -1016,13 +1127,18 @@ sub Parse_File {
     }
 
     my $line;
-    my @symbols = ();      # symbol tree that will be constructed here
-    my @struct = ();       # temporary storage for struct/union/exception
-    my @typestack = ();    # typestack, namestack, cmntstack move in parallel.
-    my @namestack = ();    # They are aux. vars for struct/union processing.
-    my @cmntstack = ();    #
+    # symbol tree that will be constructed here
+    my $symbols;
+    if ($symb) {
+        $symbols = $symb;
+    } else {
+        $symbols = [ ];
+    }
+    # @struct, @typestack, @namestack, @cmntstack use to be my() vars here.
+    # They were moved to the global scope in order to support #include
+    # statements at arbitrary locations.
     while (($line = getline($in))) {
-        # print "$line\n";
+#        print "$line\n";
         my $cmnt = 0;
         if (@comment) {
             $cmnt = [ @comment ];
@@ -1044,10 +1160,11 @@ sub Parse_File {
                     if ($#arg) {  # there's more than the closing-paren
                         warn "warning: #if not yet fully implemented\n";
                     } else {
-                        skip_input unless (exists $defines{$symbol});
+                        skip_input unless (exists $active_defines{$symbol});
                     }
                 } elsif ($symbol =~ /^[A-z]/) {
-                    if (not exists $defines{$symbol} or ! $defines{$symbol}) {
+                    if (not exists $active_defines{$symbol}
+                        or ! $active_defines{$symbol}) {
                         skip_input;
                     }
                 } elsif ($symbol !~ /^\d+$/) {
@@ -1056,11 +1173,11 @@ sub Parse_File {
             } elsif ($directive eq 'ifdef') {
                 my $symbol = shift @arg;
                 emucppmsg;
-                skip_input unless (exists $defines{$symbol});
+                skip_input unless (exists $active_defines{$symbol});
             } elsif ($directive eq 'ifndef') {
                 my $symbol = shift @arg;
                 emucppmsg;
-                skip_input if (exists $defines{$symbol});
+                skip_input if (exists $active_defines{$symbol});
             } elsif ($directive eq 'define') {
                 my $symbol = shift @arg;
                 my $value = 1;
@@ -1069,15 +1186,15 @@ sub Parse_File {
                     $value = join(' ', @arg);
                     print("// defining $symbol as $value\n") if ($verbose);
                 }
-                if (exists $defines{$symbol}) {
+                if (exists $active_defines{$symbol}) {
                     warn "info: redefining $symbol\n";
                 }
-                $defines{$symbol} = $value;
+                $active_defines{$symbol} = $value;
             } elsif ($directive eq 'undef') {
                 my $symbol = shift @arg;
                 emucppmsg;
-                if (exists $defines{$symbol}) {
-                    delete $defines{$symbol};
+                if (exists $active_defines{$symbol}) {
+                    delete $active_defines{$symbol};
                 }
             } elsif ($directive eq 'pragma') {
                 my @pragma_node;
@@ -1111,7 +1228,7 @@ sub Parse_File {
                     @pragma_node = (PRAGMA, $directive, $rest_of_line, $cmnt,
                                     curr_scope);
                 }
-                push @symbols, \@pragma_node;
+                push @$symbols, \@pragma_node;
             } elsif ($directive eq 'include') {
                 my $filename = shift @arg;
                 emucppmsg;
@@ -1125,20 +1242,48 @@ sub Parse_File {
                         $filename = substr($filename, 0, length($filename) - 1);
                     }
                 }
-                $filename =~ s/\\/\//g;
+                $filename =~ s/\\/\//g;  # convert DOS path to Unix
+                my $found = 1;
+                if (not -e "$filename") {
+                    $found = 0;
+                    foreach (@include_path) {
+                        if (-e "$_/$filename") {
+                            $filename = "$_/$filename";
+                            $found = 1;
+                            last;
+                        }
+                    }
+                }
+                $found or abort ("Cannot find file $filename");
+                my $in_global_scope = 1;
+                if (@typestack || @scopestack) {
+                    $in_global_scope = 0;
+                }
+                my $include_node = [ INCFILE, $filename, 0, $cmnt, curr_scope ];
                 my $incfile_contents_ref;
                 if (exists $includetree{$filename}) {
                     $incfile_contents_ref = $includetree{$filename};
                 } else {
-                    unshift @prev_symroots, \@symbols;
-                    $incfile_contents_ref = Parse_File($filename);
-                    $incfile_contents_ref or die "can't go on, sorry\n";
-                    shift @prev_symroots;
+                    unshift @prev_symroots, $symbols;
+                    if ($in_global_scope) {
+                        push @scopestack, $include_node;
+                    }
+                    $incfile_contents_ref = Parse_File_i($filename, undef, []);
+                    $incfile_contents_ref or abort("can't go on, sorry");
                     $includetree{$filename} = $incfile_contents_ref;
+                    shift @prev_symroots;
+                    if ($in_global_scope) {
+                        pop @scopestack;
+                    }
                 }
-                my @include_node = (INCFILE, $filename,
-                                    $incfile_contents_ref, $cmnt, curr_scope);
-                push @symbols, \@include_node;
+                if ($in_global_scope) {
+                    $$include_node[SUBORDINATES] = $incfile_contents_ref;
+                    push @$symbols, $include_node;
+                } else {
+                    foreach (@$incfile_contents_ref) {
+                        push @$symbols, $_;
+                    }
+                }
             } elsif ($directive =~ /^\d/) {
                 # It's an output from the C preprocessor generated for
                 # a "#include"
@@ -1147,6 +1292,7 @@ sub Parse_File {
                 my $filename = shift @arg;
                 $filename = substr($filename, 1, length($filename) - 2);
                 $filename =~ s@^./@@;
+                $filename =~ s:/+:/:g;
                 if ($filename eq $infilename[$currfile]) {
                     $line_number[$currfile] = $linenum;
                     next;
@@ -1165,13 +1311,13 @@ sub Parse_File {
                 push @infilename, $filename;
                 $currfile = $#infilename;
                 $line_number[$currfile] = $linenum;
-                unshift @prev_symroots, \@symbols;
-                my $incfile_contents_ref = Parse_File("", $in);
-                $incfile_contents_ref or die "can't go on, sorry\n";
+                unshift @prev_symroots, $symbols;
+                my $incfile_contents_ref = Parse_File_i("", $in, []);
+                $incfile_contents_ref or abort("can't go on, sorry");
                 shift @prev_symroots;
                 my @include_node = (INCFILE, $filename,
                                     $incfile_contents_ref, $cmnt, curr_scope);
-                push @symbols, \@include_node;
+                push @$symbols, \@include_node;
             } elsif ($directive eq 'else') {
                 skip_input;
             } elsif ($directive ne 'endif') {
@@ -1189,52 +1335,112 @@ sub Parse_File {
                 } else {
                     error('unexpected };');
                 }
-                return \@symbols;
+                return $symbols;
             }
             my $type = pop @typestack;
-            my $name = pop @namestack;
-            my $cmnt = pop @cmntstack;
-            my @structnode = ($type, $name, 0, $cmnt, curr_scope);
             if ($type == VALUETYPE) {
+                # Treating of valuetypes is asymmetric to struct/union here
+                # because the value node was pushed onto @$symbols early
+                # in order to support recursive value type definitions.
+                my @symarray = @$symbols;
+                my $vnoderef = $symarray[$#symarray];
                 my @obvsub = ($abstract, [ @vt_inheritance ], [ @struct ]);
-                $structnode[SUBORDINATES] = \@obvsub;
+                ${$vnoderef}[SUBORDINATES] = \@obvsub;
                 $abstract = 0;
                 $in_valuetype = 0;
                 @vt_inheritance = (0, 0);
             } else {
+                my $name = pop @namestack;
+                my $cmnt = pop @cmntstack;
+                if ($type == UNION && is_a($struct[0], ENUM)) {
+                    # For the case of ENUM, check that all enum values
+                    # are covered by CASEs.
+                    my $maybe_dflt = $struct[$#struct - 1];
+                    # No check possible if DEFAULT given.
+                    unless ($$maybe_dflt[TYPE] == DEFAULT) {
+                        my $enumtype = root_type($struct[0]);
+                        my %lits_given = ();
+                        my $umember;
+                        foreach $umember (@struct) {
+                            if ($$umember[TYPE] == CASE) {
+                                foreach (@{$$umember[SUBORDINATES]}) {
+                                    my $stripped_lit = $_;
+                                    $stripped_lit =~ s/^.*:://;
+                                    $lits_given{$stripped_lit} = 1;
+                                }
+                            }
+                        }
+                        foreach (@{$$enumtype[SUBORDINATES]}) {
+                            unless (defined $lits_given{$_}) {
+                                info("$name info: no case for enum value "
+                                     . $_ . " given");
+                            }
+                        }
+                    }
+                }
+                my @structnode = ($type, $name, 0, $cmnt, curr_scope);
                 $structnode[SUBORDINATES] = [ @struct ];
+                push @$symbols, \@structnode;
             }
-            push @symbols, \@structnode;
             @struct = ();
             next;
 
         } elsif ($kw eq 'module') {
             my $name = check_name(shift @arg);
             error("expecting '{'") if (shift(@arg) ne '{');
-            my @symnode = (MODULE, $name, 0, $cmnt, curr_scope);
-            push @symbols, \@symnode;
-            unshift @prev_symroots, \@symbols;
-            push @scopestack, \@symnode;
-            my $module_contents_ref = Parse_File("", $in);
-            $module_contents_ref or die "can't go on, sorry\n";
-            shift @prev_symroots;
-            my $module_ref = $symbols[$#symbols];
-            $$module_ref[SUBORDINATES] = $module_contents_ref;
+            my $subord;
+            my $fullname = $name;
+            my @scope = scope_names();
+            if (@scope) {
+                $fullname = join('::', @scope) . "::$name";
+            }
+            my $module = find_node_i($fullname, $symbols, 1);
+            if ($module) {
+                my @mnode = @$module;
+                if ($mnode[TYPE] != MODULE) {
+                    error "attempt to reopen something that is not a module";
+                    next;
+                }
+                my $outer = $mnode[SCOPEREF];
+                if ($outer && $$outer[TYPE] == INCFILE) {
+                    my $osubord = $$outer[SUBORDINATES];
+                    my $i;
+                    for ($i = 0; $i < scalar(@$osubord); $i++) {
+                        if ($$osubord[$i] == $module) {
+                            splice @$osubord, $i, 1;
+                            last;
+                        }
+                    }
+                    push @$symbols, $module;
+                }
+                $subord = $mnode[SUBORDINATES];
+            } else {
+                $subord = [ ];
+                $module = [ MODULE, $name, $subord, $cmnt, curr_scope ];
+                push @$symbols, $module;
+                unshift @prev_symroots, $symbols;
+            }
+            push @scopestack, $module;
+            Parse_File_i("", $in, $subord) or abort("can't go on, sorry");
+            unless ($module) {
+                shift @prev_symroots;
+            }
             next;
 
         } elsif ($kw eq 'interface') {
             my $name = check_name(shift @arg);
-            my @symnode = (INTERFACE, $name, 0, $cmnt, curr_scope);
+            my $subord = [ ];
+            my @symnode = (INTERFACE, $name, $subord, $cmnt, curr_scope);
             my $lasttok = pop(@arg);
             if ($lasttok eq ';') {
                 $symnode[TYPE] = INTERFACE_FWD;
-                push @symbols, \@symnode;
+                push @$symbols, \@symnode;
                 next;
             } elsif ($lasttok ne '{') {
                 error "expecting '{'";
                 next;
             }
-            my $fwd = find_node($name, \@symbols);
+            my $fwd = find_node_i($name, $symbols);
             if ($fwd) {
                 if ($$fwd[TYPE] != INTERFACE_FWD) {
                     error "type of interface fwd decl is not INTERFACE_FWD";
@@ -1254,7 +1460,7 @@ sub Parse_File {
                 my $i;  # "use strict" wants it.
                 for ($i = 0; $i < @arg; $i++) {
                     my $name = check_name($arg[$i], "ancestor name");
-                    my $ancestor_node = find_node($name, \@symbols);
+                    my $ancestor_node = find_node_i($name, $symbols);
                     if (! $ancestor_node) {
                         error "could not find ancestor $name";
                         next;
@@ -1268,15 +1474,16 @@ sub Parse_File {
                     }
                 }
             }
-            push @symbols, \@symnode;
-            unshift @prev_symroots, \@symbols;
+            push @$symbols, \@symnode;
+            unshift @prev_symroots, $symbols;
             push @scopestack, \@symnode;
-            my $iface_contents_ref = Parse_File("", $in);
-            $iface_contents_ref or die "can't go on, sorry\n";
+            Parse_File_i("", $in, $subord)
+              or abort("can't go on, sorry");
             shift @prev_symroots;
-            my @iface_nodes = (\@ancestor, $abstract, @{$iface_contents_ref});
-            my $iface_ref = $symbols[$#symbols];
-            $$iface_ref[SUBORDINATES] = \@iface_nodes;
+            unshift @$subord, \@ancestor, $abstract;
+#            my @iface_nodes = (\@ancestor, $abstract, @{$iface_contents_ref});
+#            my $iface_ref = $symbols->[$#$symbols];
+#            $$iface_ref[SUBORDINATES] = \@iface_nodes;
             $abstract = 0;
             next;
 
@@ -1291,10 +1498,11 @@ sub Parse_File {
         } elsif ($kw eq 'valuetype') {
             my $name = check_name(shift @arg);
             my @symnode = (VALUETYPE, $name, 0, $cmnt, curr_scope);
+            push @$symbols, \@symnode;
             my $nxttok = shift @arg;
             if ($nxttok eq ';') {
                 $symnode[TYPE] = VALUETYPE_FWD;
-                push @symbols, \@symnode;
+                # Aliased to $symbols[$#symbols]
                 next;
             }
             my @ancestors = ();  # do the inheritance jive
@@ -1305,7 +1513,7 @@ sub Parse_File {
                     $nxttok = shift @arg;
                 }
                 while (isname($nxttok) and $nxttok ne 'supports') {
-                    my $anc_type = find_node($nxttok, \@symbols);
+                    my $anc_type = find_node_i($nxttok, $symbols);
                     if (! isnode($anc_type)
                         || ($$anc_type[TYPE] != VALUETYPE &&
                             $$anc_type[TYPE] != VALUETYPE_BOX &&
@@ -1321,7 +1529,7 @@ sub Parse_File {
             }
             if ($nxttok eq 'supports') {
                 while (isname($nxttok = shift @arg)) {
-                    my $anc_type = find_node($nxttok, \@symbols);
+                    my $anc_type = find_node_i($nxttok, $symbols);
                     if (! $anc_type) {
                         error "unknown ancestor $nxttok";
                     } elsif (! isnode($anc_type)
@@ -1343,11 +1551,11 @@ sub Parse_File {
                 $vt_inheritance[1] = [ @ancestors ];
             } elsif (isname $nxttok) {
                 # suspect a value box
-                my $type = parse_type($nxttok, \@arg, \@symbols);
+                my $type = parse_type($nxttok, \@arg, $symbols);
                 if ($type) {
                     $symnode[TYPE] = VALUETYPE_BOX;
                     $symnode[SUBORDINATES] = $type;
-                    push @symbols, \@symnode;
+                    # Aliased to $symbols[$#symbols]
                 } else {
                     error "value box: unknown type $nxttok";
                 }
@@ -1355,18 +1563,15 @@ sub Parse_File {
             } elsif ($nxttok ne '{') {
                 error "expecting '{' at valuetype declaration";
             }
-            my $fwd = find_node($name, \@symbols);
-            if ($fwd) {
-                if ($$fwd[TYPE] != VALUETYPE_FWD) {
-                    error "type of valuetype fwd decl is not VALUETYPE_FWD";
-                    next;
-                }
+            my $fwd = find_node_i($name, $symbols);
+            if ($fwd && $$fwd[TYPE] == VALUETYPE_FWD) {
                 $$fwd[SUBORDINATES] = \@symnode;
             }
 
             push @typestack, VALUETYPE;
-            push @namestack, $name;
-            push @cmntstack, $cmnt;
+            # NB: @namestack and @cmntstack do not move in parallel here
+            # (unnecessary because the value node was already pushed onto
+            # @$symbols)
             if (@struct) {
                 error "previous struct unfinished at valuetype (?)";
                 @struct = ();
@@ -1374,14 +1579,13 @@ sub Parse_File {
             $in_valuetype = 1;
             if (@arg) {
                 if ($arg[0] eq '}' or
-                        parse_members(\@symbols, \@arg, \@struct) == 1) {
+                        parse_members($symbols, \@arg, \@struct) == 1) {
                     # end of type declaration was encountered
                     my @obvsub = ($abstract, [ @vt_inheritance ], [ @struct ]);
                     $symnode[SUBORDINATES] = \@obvsub;
-                    push @symbols, \@symnode;
+                    # \@symnode is aliased to $symbols[$#symbols]
                     $abstract = 0;
                     @vt_inheritance = (0, 0);
-                    pop @namestack;
                     pop @typestack;
                     @struct = ();
                     $in_valuetype = 0;
@@ -1403,10 +1607,10 @@ sub Parse_File {
             @struct = ();
             if (@arg) {
                 if ($arg[0] eq '}' or
-                        parse_members(\@symbols, \@arg, \@struct) == 1) {
+                        parse_members($symbols, \@arg, \@struct) == 1) {
                     # end of type declaration was encountered
                     my @node = ($type, $name, [ @struct ], $cmnt, curr_scope);
-                    push @symbols, \@node;
+                    push @$symbols, \@node;
                     pop @cmntstack;
                     pop @namestack;
                     pop @typestack;
@@ -1429,7 +1633,7 @@ sub Parse_File {
                 next;
             }
             my $switchtypename = shift @arg;
-            my $switchtype = find_node($switchtypename, \@symbols);
+            my $switchtype = find_node_i($switchtypename, $symbols);
             if (! $switchtype) {
                 error "unknown type of switch variable";
                 next;
@@ -1472,9 +1676,10 @@ sub Parse_File {
                 }
                 @node = (DEFAULT, "", 0, $cmnt);
             }
+            check_union_case(\@struct, \@node);
             push @struct, \@node;
             if (@arg) {
-                if (parse_members(\@symbols, \@arg, \@struct) == 1) {
+                if (parse_members($symbols, \@arg, \@struct) == 1) {
                     # end of type declaration was encountered
                     if ($#typestack < 0) {
                         error "internal error 1";
@@ -1489,7 +1694,7 @@ sub Parse_File {
                     }
                     my @unionnode = ($type, $name, [ @struct ], $cmnt,
                                      curr_scope);
-                    push @symbols, \@unionnode;
+                    push @$symbols, \@unionnode;
                     @struct = ();
                 }
             }
@@ -1504,7 +1709,7 @@ sub Parse_File {
         if ($kw eq 'native') {
             my $name = check_name(shift @arg, "type name");
             my @node = (NATIVE, $name, 0, $cmnt, curr_scope);
-            push @symbols, \@node;
+            push @$symbols, \@node;
 
         } elsif ($kw eq 'const') {
             my $type = shift @arg;
@@ -1513,8 +1718,11 @@ sub Parse_File {
                 error "expecting '='";
                 next;
             }
-            my $typething = find_node($type, \@symbols);
-            next unless ($typething);
+            my $typething = find_node_i($type, $symbols);
+            unless ($typething) {
+                error "unknown const type $type";
+                next;
+            }
             my @tuple = ($typething, [ @arg ]);
             if (isnode $typething) {
                 my $id = ${$typething}[TYPE];
@@ -1524,12 +1732,12 @@ sub Parse_File {
                 }
             }
             my @symnode = (CONST, $name, \@tuple, $cmnt, curr_scope);
-            push @symbols, \@symnode;
+            push @$symbols, \@symnode;
 
         } elsif ($kw eq 'typedef') {
             my $oldtype = check_name(shift @arg, "name of original type");
             # TO BE DONE: oldtype is STRUCT or UNION
-            my $existing_typenode = parse_type($oldtype, \@arg, \@symbols);
+            my $existing_typenode = parse_type($oldtype, \@arg, $symbols);
             if (! $existing_typenode) {
                 error "unknown type $oldtype";
                 next;
@@ -1549,7 +1757,7 @@ sub Parse_File {
             }
             my @subord = ($existing_typenode, [ @dimensions ]);
             my @node = (TYPEDEF, $newtype, \@subord, $cmnt, curr_scope);
-            push @symbols, \@node;
+            push @$symbols, \@node;
 
         } elsif ($kw eq 'enum') {
             my $typename = check_name(shift @arg, "type name");
@@ -1588,7 +1796,7 @@ sub Parse_File {
                 }
             }
             my @symnode = (ENUM, $typename, [ @values ], $cmnt, curr_scope);
-            push @symbols, [ @symnode ];
+            push @$symbols, [ @symnode ];
 
         } elsif ($kw eq 'readonly' or $kw eq 'attribute') {
             my $readonly = 0;
@@ -1600,7 +1808,7 @@ sub Parse_File {
                 $readonly = 1;
             }
             my $typename = shift @arg;
-            my $type = parse_type($typename, \@arg, \@symbols);
+            my $type = parse_type($typename, \@arg, $symbols);
             if (! $type) {
                 error "unknown type $typename";
                 next;
@@ -1612,7 +1820,7 @@ sub Parse_File {
                 my @value_member = (0, \@node);
                 push @struct, \@value_member;
             } else {
-                push @symbols, \@node;
+                push @$symbols, \@node;
             }
 
         } elsif ($line =~ /\(.*\)\s*;$/) {
@@ -1630,7 +1838,7 @@ sub Parse_File {
             } elsif ($in_valuetype and $kw eq 'factory') {
                 $rettype = FACTORY;
             } else {
-                $rettype = parse_type($kw, \@arg, \@symbols);
+                $rettype = parse_type($kw, \@arg, $symbols);
                 if (! $rettype) {
                     error "unknown return type $kw";
                     next;
@@ -1668,7 +1876,7 @@ sub Parse_File {
                     error("illegal mode of parameter $pname");
                     last;
                 }
-                my $ptype = find_node($typename, \@symbols);
+                my $ptype = find_node_i($typename, $symbols);
                 if (! $ptype) {
                     error "unknown type of parameter $pname";
                     last;
@@ -1689,7 +1897,7 @@ sub Parse_File {
             if ($expecting_exception_list) {
                 while (@arg) {
                     my $exc_name = shift @arg;
-                    my $exc_type = find_node($exc_name, \@symbols);
+                    my $exc_type = find_node_i($exc_name, $symbols);
                     if (! $exc_type) {
                         error "unknown exception $exc_name";
                         last;
@@ -1705,7 +1913,7 @@ sub Parse_File {
                 }
             }
             push @{$node[SUBORDINATES]}, \@exception_list;
-            push @symbols, \@node;
+            push @$symbols, \@node;
 
         } else {                          # Data
             if ($#typestack < 0) {
@@ -1713,13 +1921,26 @@ sub Parse_File {
                 next;
             }
             unshift @arg, $kw;   # put type back into @arg
-            if (parse_members(\@symbols, \@arg, \@struct, $cmnt) == 1) {
+            if (parse_members($symbols, \@arg, \@struct, $cmnt) == 1) {
                 # end of type declaration was encountered
                 my $type = pop @typestack;
-                my $name = pop @namestack;
-                $cmnt = pop @cmntstack;
-                my @node = ($type, $name, [ @struct ], $cmnt, curr_scope);
-                push @symbols, [ @node ];
+                if ($type == VALUETYPE) {
+                    # Treating of valuetypes is asymmetric to struct/union here
+                    # because the value node was pushed onto @$symbols early
+                    # in order to support recursive value type definitions.
+                    my @symarray = @$symbols;
+                    my $vnoderef = $symarray[$#symarray];
+                    my @obvsub = ($abstract, [ @vt_inheritance ], [ @struct ]);
+                    ${$vnoderef}[SUBORDINATES] = \@obvsub;
+                    $abstract = 0;
+                    $in_valuetype = 0;
+                    @vt_inheritance = (0, 0);
+                } else {
+                    my $name = pop @namestack;
+                    $cmnt = pop @cmntstack;
+                    my @node = ($type, $name, [ @struct ], $cmnt, curr_scope);
+                    push @$symbols, [ @node ];
+                }
                 @struct = ();
             }
         }
@@ -1727,12 +1948,14 @@ sub Parse_File {
     if ($file) {
         close $in;
         pop @infilename;
+        pop @line_number;
         $currfile--;
     }
     if ($n_errors) {
         return 0;
     }
-    \@symbols;
+    bless($symbols, "CORBA::IDLtree") unless $symb;
+    return $symbols;
 }
 
 
@@ -1757,18 +1980,15 @@ sub require_end_of_stmt {
 
 sub isnode {
     my $node_ref = shift;
-    if (! $node_ref or $node_ref < NUMBER_OF_TYPES) {
-        return 0;
-    }
-    my @node = @{$node_ref};
-    if ($#node != 4
-        or $node[TYPE] < BOOLEAN or $node[TYPE] >= NUMBER_OF_TYPES) {
-        return 0;
-    }
-    # NB: The ($#node != 4) means that component descriptors of 
+
+    return ref($node_ref)
+        && @$node_ref == 5
+        && $$node_ref[TYPE] >= BOOLEAN
+        && $$node_ref[TYPE] < NUMBER_OF_TYPES;
+
+    # NB: The (@$node_ref == 5) means that component descriptors of 
     # structs/unions/exceptions and parameter descriptors of methods
     # do not qualify as nodes.
-    1;
 }
 
 
@@ -1783,7 +2003,7 @@ sub is_scope {
 }
 
 
-sub find_node_recursive {   # auxiliary to find_node()
+sub find_node_i_recursive {   # auxiliary to find_node_i()
     my ($name, $root) = @_;
     my $sep = index $name, '::';
     if ($sep < 0) {
@@ -1807,7 +2027,7 @@ sub find_node_recursive {   # auxiliary to find_node()
                     return $_;
                 }
                 if ($n[TYPE] == INCFILE) {
-                    my $result = find_node_recursive($name, $n[SUBORDINATES]);
+                    my $result = find_node_i_recursive($name, $n[SUBORDINATES]);
                     if ($result) {
                         return $result;
                     }
@@ -1822,7 +2042,7 @@ sub find_node_recursive {   # auxiliary to find_node()
     $name = substr($name, $sep + 2);
     while ($root) {
         if (isnode $root and $$root[NAME] eq $this_prefix) {
-            return find_node_recursive($name, $root);
+            return find_node_i_recursive($name, $root);
         }
         my @decls;
         if (is_scope $root) {
@@ -1838,11 +2058,11 @@ sub find_node_recursive {   # auxiliary to find_node()
             my $result = 0;
             my @n = @{$_};
             if (is_scope $_ and $n[NAME] eq $this_prefix) {
-                $result = find_node_recursive($name, $_);
+                $result = find_node_i_recursive($name, $_);
             } elsif ($n[TYPE] == INCFILE) {
-                $result = find_node_recursive($this_prefix, $n[SUBORDINATES]);
+                $result = find_node_i_recursive($this_prefix, $n[SUBORDINATES]);
                 if ($result) {
-                    $result = find_node_recursive($name, $result);
+                    $result = find_node_i_recursive($name, $result);
                 }
             }
             if ($result) {
@@ -1854,31 +2074,38 @@ sub find_node_recursive {   # auxiliary to find_node()
     }
     return 0;
 }
- 
+
 
 # Return the names of the nodes in @scopestack as a list.
 sub scope_names {
     my @names = ();
     my $noderef;  # "use strict" wants it.
     foreach $noderef (@scopestack) {
-        push @names, $$noderef[NAME];
+        unless ($$noderef[TYPE] == INCFILE) {
+            push @names, $$noderef[NAME];
+        }
     }
     @names;
 }
 
 
-sub find_node {
+sub find_node_i {
     # Returns a reference to the defining node, or a type id value
     # if the name given is a CORBA predefined type name.
     # Returns 0 if the name could not be identified.
-    my ($name, $current_symtree_ref) = @_;
+    my $name = shift;
+    my $current_symtree_ref = shift;
+    my $seek_module = 0;
+    if (@_) {
+        $seek_module = shift;
+    }
     my $predef_type_id = predef_type($name);
     if ($predef_type_id) {
         return $predef_type_id;
     }
     my @namecomponents = split(/::/, $name);
     my $nseps = scalar(@namecomponents) - 1;
-    if ($nseps) {
+    if ($nseps and not $seek_module) {
         # Discard same-scope prefix.
         my $given_prefix = $name;
         $given_prefix =~ s/::\w+$//;
@@ -1890,12 +2117,12 @@ sub find_node {
             }
         }
     }
-    my $noderef = find_node_recursive($name, $current_symtree_ref);
+    my $noderef = find_node_i_recursive($name, $current_symtree_ref);
     if ($noderef) {
         return $noderef;
     }
     foreach $noderef (@prev_symroots) {
-        my $result_node_ref = find_node_recursive($name, $noderef);
+        my $result_node_ref = find_node_i_recursive($name, $noderef);
         if ($result_node_ref) {
             return $result_node_ref;
         }
@@ -1905,11 +2132,27 @@ sub find_node {
 
 
 
+sub info {
+    my $message = shift;
+    warn ($infilename[$currfile]  . " line " . $line_number[$currfile]
+                  . ": $message\n");
+}
+
 sub error {
     my $message = shift;
     warn ($infilename[$currfile]  . " line " . $line_number[$currfile]
                   . ": $message\n");
     $n_errors++;
+}
+
+sub abort {
+    my $message = shift;
+    my $f = "";
+    if ($currfile >= 0) {
+        $f = $infilename[$currfile]  . " line " . $line_number[$currfile]
+          . ": ";
+    }
+    die ($f . $message . "\n");
 }
 
 
@@ -1923,14 +2166,14 @@ sub typeof {      # Returns the string of a "type descriptor" in IDL syntax
         $gen_scope = shift;
     }
     my $rv = "";
-    if ($type >= BOOLEAN && $type < NUMBER_OF_TYPES) {
+    if (!ref($type) && ($type >= BOOLEAN && $type < NUMBER_OF_TYPES)) {
         $rv = $predef_types[$type];
         if ($type <= ANY) {
             $rv =~ s/_/ /g;
         }
         return $rv;
     } elsif (! isnode($type)) {
-        error "internal error: parameter to typeof is not a node ($type)\n";
+        warn "internal error: parameter to typeof is not a node ($type)\n";
         return "";
     }
     my @node = @{$type};
@@ -1980,28 +2223,39 @@ sub typeof {      # Returns the string of a "type descriptor" in IDL syntax
 
 sub is_a {
     # Determines whether node is of given type. Recurses through TYPEDEFs.
-    my $type = shift;
-    my $typeid = shift;
+    my ($type, $typeid) = @_;
+
     unless ($type) {
         warn("CORBA::IDLtree::is_a: invalid input (comparing to "
              . typeof($typeid) . ")\n");
         return 0;
     }
-    if (not isnode $type) {
-        return ($type == $typeid);
-    }
-    my @node = @{$type};
-    my $rv = 0;
-    if ($node[TYPE] == $typeid) {
-        $rv = 1;
-    } elsif ($node[TYPE] == TYPEDEF) {
-        my @origtype_and_dim = @{$node[SUBORDINATES]};
-        my $dimref = $origtype_and_dim[1];
-        unless ($dimref && @{$dimref}) {
-            $rv = is_a($origtype_and_dim[0], $typeid);
+    if (! isnode $type) {
+        if ($typeid > 0) {
+            return $type == $typeid;
+        } else {
+            return typeof($type) eq $typeid;
         }
     }
-    $rv
+
+    # check the node
+    if ($typeid > 0) {
+        return 1 if $type->[TYPE] == $typeid;
+    } else {
+        return 1 if scoped_name($type) eq $typeid;
+    }
+    return 0 unless $type->[TYPE] == TYPEDEF;
+
+    # we have a typedef
+
+    my $origtype_and_dim = $type->[SUBORDINATES];
+
+    # array ?
+    my $dimref = $$origtype_and_dim[1];
+    return 0 if $dimref && @{$dimref};
+
+    # no, recursivly check basetype
+    return is_a($$origtype_and_dim[0], $typeid);
 }
 
 sub root_type {
@@ -2015,6 +2269,265 @@ sub root_type {
         }
     }
     $type
+}
+
+sub root_elem_type {
+    # Returns the original type of a TYPEDEF, i.e. recurses through
+    # all TYPEDEFs until the original type is reached.
+    my $type = shift;
+    if (isnode $type and $$type[TYPE] == TYPEDEF) {
+        return root_elem_type($type->[SUBORDINATES][0]);
+    }
+    return $type;
+}
+
+
+{
+my @used_files;
+
+sub get_files_included {     # Auxiliary to sub files_included
+    my $symroot = shift;
+    ref $symroot or return;
+    foreach (@$symroot) {
+        my @node = @$_;
+        if ($node[TYPE] == INCFILE) {
+            my $name = $node[NAME];
+            unless (grep { $_ eq $name } @used_files) {
+                push @used_files, $name;
+                get_files_included $node[SUBORDINATES];
+            }
+        }
+    }
+}
+
+sub files_included {
+    @used_files = ();
+    get_files_included shift;
+    @used_files
+}
+}
+
+
+sub get_numeric {
+    my $tree = shift;
+    my ($value) = @_;
+
+    if ($value =~ /^[-+]?\d/) {
+        return $value; # + 0;  Try to do without...
+    }
+    if (isnode($value)) {
+        # only const node allowed here
+        return undef unless $value->[TYPE] == CONST;
+        return $tree->get_numeric($value->[SUBORDINATES][1][0]);
+    }
+    my $node = $tree->find_node($value);
+    if (!$node || !isnode($node)) {
+        warn("unknown value: $value\n");
+        return $value;
+    }
+    return $tree->get_numeric($node);
+}
+
+##################################################################
+# return a numerical array dimension
+# if a number is given, return that number
+# if the number of CONST is given, return the value of the CONST
+#     (recursively if necessary)
+sub get_dim {
+    my $tree = shift;
+    my ($dim) = @_;
+
+    if ($dim =~ /^\d+$/) {
+        return $dim + 0;
+    }
+    if (isnode($dim)) {
+        if ($$dim[TYPE] == CONST) {
+            return $tree->get_dim($$dim[SUBORDINATES][1][0]);
+        }
+        warn("array dimension must be const: ".$$dim[NAME]."\n");
+        return $$dim[NAME];
+    }
+    my $node = $tree->find_node($dim);
+    if (!$node || !isnode($node)) {
+        warn("unknown array dimension: $dim\n");
+        return $dim;
+    }
+    return $tree->get_dim($node);
+}
+
+
+# Subs for finding stuff
+
+sub find_in_current_scope {  # Auxiliary to find_scope() / find_node().
+    my $name = shift;
+    my $scoperef = shift;
+    my $must_be_scope_node = 0;
+    if (@_) {
+        $must_be_scope_node = shift;
+    }
+    return undef unless defined $scoperef->[SUBORDINATES];
+
+    my $decls = $scoperef->[SUBORDINATES];
+    my $start = 0;
+    my $end = $#$decls;
+    if ($scoperef->[TYPE] == CORBA::IDLtree::INTERFACE) {
+        $start = 2;
+    }
+    for (my $i=$start; $i<=$end; $i++) {
+        my $node = $decls->[$i];
+        if (@$node > 1 && $node->[NAME] eq $name) {
+            if ($must_be_scope_node and not CORBA::IDLtree::is_scope $node) {
+                warn("warning: $name also used in " .
+                     scoped_name($node) . "\n");
+            } else {
+                return $node;
+            }
+        }
+    }
+    undef;
+}
+
+sub find_scope_i;  # Auxiliary to find_scope().
+
+sub find_scope_i {
+    my ($scopelist_ref, $currscope, $global_symroot) = @_;
+    my @scopes = @{$scopelist_ref};
+    # $currscope sometimes is 0 instead of undef...
+
+    $currscope = undef unless $currscope;
+    unless (defined $currscope) {
+        return undef unless defined $global_symroot;
+
+        # Try find it somewhere in $global_symroot.
+      GLOBAL_SCOPES:
+        foreach (@$global_symroot) {
+            if ($$_[TYPE] == INCFILE) {
+                foreach (@{$$_[SUBORDINATES]}) {
+                    if (is_scope($_) || $_->[TYPE] == INCFILE) {
+                        $currscope = find_scope_i(\@scopes, $_);
+                        last GLOBAL_SCOPES if $currscope;
+                    }
+                }
+            } elsif (CORBA::IDLtree::is_scope($_) && $scopes[0] eq $$_[NAME]) {
+                # It's in this scope.
+                $currscope = $_;
+                last;
+            }
+        }
+        return undef unless defined $currscope;
+    }
+
+    if ($scopes[0] eq $$currscope[NAME]) {
+        # It's in the current scope.
+        shift @scopes;
+        while (@scopes) {
+            my $sought_name = shift @scopes;
+            $currscope = find_in_current_scope($sought_name, $currscope, 1);
+            last unless $currscope;
+        }
+        return $currscope;
+    }
+    # Not a direct match with current scope.
+    # Try the scopes nested in the current scope.
+    my $scope = find_in_current_scope($scopes[0], $currscope, 1);
+    if ($scope) {
+        shift @scopes;
+        while (@scopes) {
+            my $sought_name = shift @scopes;
+            $scope = find_in_current_scope($sought_name, $scope, 1);
+            last unless $scope;
+        }
+        return $scope;
+    }
+    # Still no match. Step outside and try again.
+    find_scope_i($scopelist_ref, $$currscope[SCOPEREF], $global_symroot);
+}
+
+sub find_scope {
+    my $global_symroot = shift;
+    my ($scopelist_ref, $currscope) = @_;
+
+    my $scoperef = undef;
+    $scoperef = find_scope_i($scopelist_ref, $currscope)
+      if defined $currscope;
+
+    # undef as the second arg to find_scope_i means
+    # try to find it anywhere in $global_symroot.
+    $scoperef = find_scope_i($scopelist_ref, undef, $global_symroot)
+      unless defined $scoperef;
+
+    $scoperef;
+}
+
+# return a list of scope names leading to the given scope
+# (including the scope itself)
+sub get_scope {
+    my ($scoperef) = @_;
+    return () unless ref($scoperef);
+    return () if ($scoperef->[TYPE] == INCFILE);
+    return (get_scope($scoperef->[SCOPEREF]), $scoperef->[NAME]);
+}
+
+sub find_node {
+    my $global_symroot = shift;
+    my ($name, $scoperef, $recurse) = @_;
+
+    my @components = split(/::/, $name);
+    my $noderef = undef;
+    if (scalar(@components) > 1) {
+        $name = pop @components;
+        $scoperef = $global_symroot->find_scope(\@components, $scoperef);
+        if (defined $scoperef) {
+            $noderef = find_in_current_scope($name, $scoperef);
+        }
+    } elsif (defined $scoperef) {
+        my $scope = $scoperef;
+        while ($scope) {
+            $noderef = find_in_current_scope($name, $scope);
+            last if $noderef;
+            $scope = $$scope[SCOPEREF];
+        }
+        if ($recurse && !$noderef) {
+            foreach (@{$scoperef->[SUBORDINATES]}) {
+                if ($$_[TYPE] == INCFILE || $$_[TYPE] == MODULE) {
+                    $noderef = $global_symroot->find_node($name, $_, 1);
+                    last if $noderef;
+                }
+            }
+        }
+    } else {
+        foreach (@$global_symroot) {
+            if ($$_[NAME] eq $name) {
+                return $_;
+            }
+        }
+        # FIXME: This is not really correct:
+        #  If no scope is given, search in all scopes, recursively
+        foreach (@$global_symroot) {
+            if ($$_[TYPE] == INCFILE || $$_[TYPE] == MODULE) {
+                $noderef = $global_symroot->find_node($name, $_, 1);
+                last if $noderef;
+            }
+        }
+    }
+    $noderef
+}
+
+sub scoped_name {
+    my ($node) = @_;
+
+    if (isnode($node)) {
+        my $sc = $node->[SCOPEREF];
+        my @scopes = ($node->[NAME]);
+        while ($sc) {
+            unshift @scopes, $sc->[NAME]
+              unless $sc->[TYPE] == INCFILE;
+            $sc = $sc->[SCOPEREF];
+        }
+        return join("::", @scopes);
+    } else {
+        return typeof($node);
+    }
 }
 
 
@@ -2401,3 +2914,7 @@ sub traverse_tree {
 
 1;
 
+# Local Variables:
+# cperl-indent-level: 4
+# indent-tabs-mode: nil
+# End:

@@ -22,7 +22,7 @@ stdout in IDL syntax.
 SYMBOL TREE STRUCTURE
 
 The following description of the structure of the symbol tree
-applies to CORBA::IDLtree version >= 1.0.  The structure
+applies to CORBA::IDLtree versions >= 1.0.  The structure
 has been changed w.r.t. previous releases, for example the
 INTERFACE node now has an "abstract" flag. Also, all the
 scalars used as constants, e.g. $INTERFACE, have been changed to
@@ -39,7 +39,7 @@ A node is a five-element array with the elements
   [0] => TYPE (MODULE|INTERFACE|STRUCT|UNION|ENUM|TYPEDEF...)
   [1] => NAME
   [2] => SUBORDINATES
-  [3] => COMMENT
+  [3] => COMMENT  (introduced in IDLtree version 1.2)
   [4] => SCOPEREF
 
 Some IDL types are representable as a simple numeric constant;
@@ -188,9 +188,12 @@ at the IDL item.
 
 The SCOPEREF element is a reference back to the node of the module or
 interface enclosing the current node. If the current node is already
-at the global scope level, then the SCOPEREF is 0. All nodes have this
-element except for the parameter nodes of methods and the component nodes
-of structs/unions/exceptions.
+at the global scope level, then the SCOPEREF is 0. If the current node
+is inside an INCFILE, the SCOPEREF element points to the corresponding
+INCFILE node (the INCFILE reference was introduced in IDLtree version
+1.3.)  All nodes have this element except for the parameter nodes of
+methods and the component nodes of structs/unions/exceptions.
 
--- 2002/07/08  okellogg@users.sourceforge.net
+-- Last updated: 2002/12/01
+-- okellogg@users.sourceforge.net
 
