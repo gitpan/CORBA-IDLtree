@@ -28,10 +28,55 @@ sub init_variables {
     $global_basename = "";
 }
 
-# Shorthand for CORBA::IDLtree::typeof
-sub typeof {
-    CORBA::IDLtree::typeof(shift, CORBA::IDLtree::LANG_CPP, \@scopes);
+sub cpptypeof {  # Returns the string of a "type descriptor" in C++ syntax.
+    my $type = shift;
+    my $gen_scope = 0;       # generate scope-qualified name
+    if (@_) {
+        $gen_scope = shift;
+    }
+    my $rv = "";
+    if ($type >= CORBA::IDLtree::BOOLEAN &&
+        $type < CORBA::IDLtree::NUMBER_OF_TYPES) {
+        if ($type <= CORBA::IDLtree::ANY) {
+            my @cpptype = qw/ none Boolean Octet Char WChar Short Long
+                            LongLong UShort ULong ULongLong Float Double
+                            LongDouble String WString Object TypeCode Any /;
+            $rv = "CORBA::" . $cpptype[$type];
+        } else {
+            # This shouldn't really happen...
+            $rv = $CORBA::IDLtree::predef_types[$type];
+        }
+        return $rv;
+    } elsif (! CORBA::IDLtree::isnode($type)) {
+        warn "parameter to cpptypeof is not a node ($type)\n";
+        return "";
+    }
+    my @node = @{$type};
+    my $name = $node[NAME];
+    my $prefix = "";
+    if ($gen_scope) {
+        my @tmpnode = @node;
+        my @scope;
+        while ((@scope = @{$tmpnode[CORBA::IDLtree::SCOPEREF]})) {
+            $prefix = $scope[NAME] . "::" . $prefix;
+            @tmpnode = @scope;
+        }
+        if (ref $gen_scope) {
+            # @gen_scope contains the scope strings.
+            # Now we can decide whether the scope prefix is needed.
+            my $curr_scope = join("::", @{$gen_scope});
+            if ($prefix eq "${curr_scope}::") {
+                $prefix = "";
+            }
+        }
+    }
+    "$prefix$name"
 }
+
+sub typeof {
+    cpptypeof(shift, \@scopes);
+}
+
 
 
 sub array_info {
@@ -81,7 +126,7 @@ sub is_structured {
 
 
 sub fqname {
-    CORBA::IDLtree::typeof(shift, CORBA::IDLtree::LANG_CPP, 1);
+    cpptypeof(shift, 1);
 }
 
 

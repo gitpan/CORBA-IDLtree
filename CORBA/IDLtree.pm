@@ -1,10 +1,23 @@
-# CORBA/IDLtree.pm  IDL to symbol tree translator
+# CORBA/IDLtree.pm   IDL to symbol tree translator
 # This module is distributed under the same terms as Perl itself.
-# Copyright/author:  (C) 1998-2002, Oliver M. Kellogg (gnack@adapower.com)
+# Copyright/author:  (C) 1998-2002, Oliver M. Kellogg
+# Contact:           okellogg@users.sourceforge.net
 # 
 # -----------------------------------------------------------------------------
 # Ver. |   Date   | History
 # -----+----------+------------------------------------------------------------
+#  1.1  2002/06/24  Removed non-standard extensions.
+#                   In the interest of IDL conformance, changed the scope
+#                   separator used internally to "::". (This separator
+#                   may appear at union CASE designators and in CONST
+#                   expressions.)
+#                   Removed the LANG constants, and removed support for
+#                   languages other than IDL in sub typeof.
+#                   Corrected parsing of valuetype boxes.
+#                   Repaired `const string' and implemented simple `const'
+#                   used as a bounded-string bound expression.
+#                   Added detection of unclosed comment at end of file.
+#                   Added NATIVE.
 #  1.0  2002/02/04  Turned all variables used as constants into subroutines.
 #                   Attention, unfortunately this impacts all applications;
 #                   e.g. the former $CORBA::IDLtree::BOOLEAN is now written
@@ -80,13 +93,12 @@
 
 
 package CORBA::IDLtree;
-require 5.000;
+require 5.002;
 require Exporter;
 # use Config;
 @ISA = (Exporter);
 @EXPORT = ();
-@EXPORT_OK = ();  # &Parse_File, &Dump_Symbols, and all the constants
-                  # (ENUM etc.) ;  potentially: %Prefixes
+@EXPORT_OK = ();  # &Parse_File, &Dump_Symbols, and all the constants subs
 
 
 # -----------------------------------------------------------------------------
@@ -186,10 +198,18 @@ require Exporter;
 #                                 method node subordinates (i.e., the return
 #                                 type) may be FACTORY.
 #                          [1] => reference to the defining node.
+#                                 In case of PRIVATE or PUBLIC state member,
+#                                 the defining node is a triple (3-element
+#                                 list) containing:
+#                                 [0] => member type id
+#                                 [1] => member name
+#                                 [2] => dimensions
 #
 #   VALUETYPE_BOX   Reference to the defining type node.
 #
 #   VALUETYPE_FWD   Subordinates unused.
+#                   
+#   NATIVE          Subordinates unused.
 #                   
 #   ATTRIBUTE       Reference to a two-element array; element 0 is the read-
 #                   only flag (0 for read/write attributes), element 1 is a
@@ -211,6 +231,13 @@ require Exporter;
 #                   within the include file. The Name element of this node
 #                   contains the include file name.
 #
+#   PRAGMA_PREFIX   Subordinates unused.
+#
+#   PRAGMA_VERSION  Version string.
+#
+#   PRAGMA_ID       ID string.
+#
+#
 # The SCOPEREF element is a reference back to the node of the module or 
 # interface enclosing the current node. If the current node is already
 # at the global scope level, then the SCOPEREF is 0. All nodes have this
@@ -223,10 +250,10 @@ require Exporter;
 sub Parse_File;
     # Parse_File() is the universal entry point (called by the main program.)
     # It takes an IDL file name as the input parameter and parses that file,
-    # constructing a symbol tree which is its return value. If there were
-    # errors, then Parse_File returns 0.
-    # The second argument is optional and is the command line to the C 
-    # preprocessor.
+    # constructing one or more symbol trees for the outermost declaration(s)
+    # encountered. It returns a reference to an array containing references
+    # to those trees.
+    # In case of errors during parsing , Parse_File returns 0.
 
 # User definable auxiliary data for Parse_File:
 @include_path = ();     # Paths where to look for included IDL files
@@ -239,102 +266,87 @@ sub Dump_Symbols;
 # Visible constants ###########################################################
 
 # Meanings of symbol node index
-sub TYPE         { 0; }
-sub NAME         { 1; }
-sub SUBORDINATES { 2; }
-sub MODE         { 2; }    # alias of SUBORDINATES (for method parameter nodes)
-sub SCOPEREF     { 3; }
+sub TYPE ()         { 0 }
+sub NAME ()         { 1 }
+sub SUBORDINATES () { 2 }
+sub MODE ()         { 2 } # alias of SUBORDINATES (for method parameter nodes)
+sub SCOPEREF ()     { 3 }
 
 # Parameter modes
-sub IN    { 1; }
-sub OUT   { 2; }
-sub INOUT { 3; }
+sub IN ()    { 1 }
+sub OUT ()   { 2 }
+sub INOUT () { 3 }
 
 # Meanings of the TYPE entry in the symbol node.
 # If these codes are changed, then @predef_types must be changed accordingly.
-sub NONE            { 0; }   # error/illegality value
-sub BOOLEAN         { 1; }
-sub OCTET           { 2; }
-sub CHAR            { 3; }
-sub WCHAR           { 4; }
-sub SHORT           { 5; }
-sub LONG            { 6; }
-sub LONGLONG        { 7; }
-sub USHORT          { 8; }
-sub ULONG           { 9; }
-sub ULONGLONG       { 10; }
-sub FLOAT           { 11; }
-sub DOUBLE          { 12; }
-sub LONGDOUBLE      { 13; }
-sub STRING          { 14; }
-sub WSTRING         { 15; }
-sub OBJECT          { 16; }
-sub TYPECODE        { 17; }
-sub ANY             { 18; }
-sub FIXED           { 19; }  # node
-sub BOUNDED_STRING  { 20; }  # node
-sub BOUNDED_WSTRING { 21; }  # node
-sub SEQUENCE        { 22; }  # node
-sub ENUM            { 23; }  # node
-sub TYPEDEF         { 24; }  # node
-sub RANGEDEF        { 25; }  # node; unused in standard CORBA;
-                             #       subo=(urtyp,subtype,min,max,unit)
-sub STRUCT          { 26; }  # node
-sub UNION           { 27; }  # node
-sub SWITCHNAME      { 28; }  # node; unused in standard CORBA; subo unused
-sub CASE            { 29; }
-sub DEFAULT         { 30; }
-sub EXCEPTION       { 31; }  # node
-sub CONST           { 32; }  # node
-sub MODULE          { 33; }  # node
-sub INTERFACE       { 34; }  # node
-sub INTERFACE_FWD   { 35; }  # node
-sub VALUETYPE       { 36; }  # node
-sub VALUETYPE_FWD   { 37; }  # node
-sub VALUETYPE_BOX   { 38; }  # node
-sub ATTRIBUTE       { 39; }  # node
-sub ONEWAY          { 40; }  # implies "void" as the return type
-sub VOID            { 41; }
-sub FACTORY         { 42; }  # treated as return type of METHOD;
+sub NONE ()            { 0 }   # error/illegality value
+sub BOOLEAN ()         { 1 }
+sub OCTET ()           { 2 }
+sub CHAR ()            { 3 }
+sub WCHAR ()           { 4 }
+sub SHORT ()           { 5 }
+sub LONG ()            { 6 }
+sub LONGLONG ()        { 7 }
+sub USHORT ()          { 8 }
+sub ULONG ()           { 9 }
+sub ULONGLONG ()       { 10 }
+sub FLOAT ()           { 11 }
+sub DOUBLE ()          { 12 }
+sub LONGDOUBLE ()      { 13 }
+sub STRING ()          { 14 }
+sub WSTRING ()         { 15 }
+sub OBJECT ()          { 16 }
+sub TYPECODE ()        { 17 }
+sub ANY ()             { 18 }
+sub FIXED ()           { 19 }  # node
+sub BOUNDED_STRING ()  { 20 }  # node
+sub BOUNDED_WSTRING () { 21 }  # node
+sub SEQUENCE ()        { 22 }  # node
+sub ENUM ()            { 23 }  # node
+sub TYPEDEF ()         { 24 }  # node
+sub NATIVE ()          { 25 }  # node
+sub STRUCT ()          { 26 }  # node
+sub UNION ()           { 27 }  # node
+sub CASE ()            { 28 }
+sub DEFAULT ()         { 29 }
+sub EXCEPTION ()       { 30 }  # node
+sub CONST ()           { 31 }  # node
+sub MODULE ()          { 32 }  # node
+sub INTERFACE ()       { 33 }  # node
+sub INTERFACE_FWD ()   { 34 }  # node
+sub VALUETYPE ()       { 35 }  # node
+sub VALUETYPE_FWD ()   { 36 }  # node
+sub VALUETYPE_BOX ()   { 37 }  # node
+sub ATTRIBUTE ()       { 38 }  # node
+sub ONEWAY ()          { 39 }  # implies "void" as the return type
+sub VOID ()            { 40 }
+sub FACTORY ()         { 41 }  # treated as return type of METHOD;
                              #       can only occur inside valuetype
-sub METHOD          { 43; }  # node
-sub INCFILE         { 44; }  # node
-sub PRAGMA_PREFIX   { 45; }  # node
-sub PRAGMA_VERSION  { 46; }  # node
-sub PRAGMA_ID       { 47; }  # node
-sub NUMBER_OF_TYPES { 48; }
+sub METHOD ()          { 42 }  # node
+sub INCFILE ()         { 43 }  # node
+sub PRAGMA_PREFIX ()   { 44 }  # node
+sub PRAGMA_VERSION ()  { 45 }  # node
+sub PRAGMA_ID ()       { 46 }  # node
+sub NUMBER_OF_TYPES () { 47 }
 # The @predef_types array must have the types in the same order as
 # the numeric order of type identifying constants defined above.
 @predef_types = qw/ none boolean octet char wchar short long long_long 
                     unsigned_short unsigned_long unsigned_long_long
                     float double long_double string wstring Object 
                     TypeCode any fixed bounded_string bounded_wstring
-                    sequence enum typedef rangedef struct union switchname
-                    case default exception const module interface interface_fwd 
+                    sequence enum typedef native struct union case default
+                    exception const module interface interface_fwd 
                     valuetype valuetype_fwd valuetype_box
                     attribute oneway void factory method 
                     include pragma_prefix pragma_version pragma_id /;
 
 # Valuetype flag values
-sub ABSTRACT      { 1; }
-sub TRUNCATABLE   { 2; }
-sub CUSTOM        { 3; }
+sub ABSTRACT      { 1 }
+sub TRUNCATABLE   { 2 }
+sub CUSTOM        { 3 }
 # valuetype member flags
-sub PRIVATE       { 1; }
-sub PUBLIC        { 2; }
-sub FACTORY       { 3; }
-
-# Language conventions
-# Note that the IDLtree module is meant to be language independent.
-# The only place these conventions are used is at sub typeof which
-# returns the type name of a node in a language dependent notation.
-# However, sub typeof is just an add-on commodity not required for
-# IDLtree's basic functioning.
-sub LANG_IDL   { 0; }
-sub LANG_C     { 1; }
-sub LANG_CPP   { 2; }
-sub LANG_ADA   { 3; }
-sub LANG_JAVA  { 4; }
+sub PRIVATE       { 1 }
+sub PUBLIC        { 2 }
 
 # Visible subroutines #########################################################
 
@@ -382,11 +394,6 @@ my $in_comment = 0;     # Auxiliary to &getline (multi-line comment processing)
 my $in_valuetype = 0;   # Auxiliary to valuetype processing
 my $currfile = -1;
 my $emucpp = 1;         # use C preprocessor emulation
-# Non standard extensions
-my @range_bounds = ();      # (low, high) bound of RANGEDEF
-my $unit = "";              # unit of RANGEDEF
-my $is_subtype = 0;         # $is_subtype flag of RANGEDEF
-my $union_switchname = "";  # SWITCHNAME in UNION
 
 sub locate_executable {
     # FIXME: this is probably another reinvention of the wheel.
@@ -405,45 +412,17 @@ sub locate_executable {
     $fully_qualified_name;
 }
 
-sub decode_special_comment {  # unused in standard CORBA
-    my $str = shift;
-    if ($str =~ /switchname\s+(\w+)/) {
-        $union_switchname = $1;
-        return;
-    }
-    $is_subtype = 1;
-    if ($str =~ /derived_type/) {
-        $is_subtype = 0;
-    }
-    if ($str =~ /range\s+\[\s*(.*?)\s*:\s*(.*?)\]/) {
-        $range_bounds[0] = $1;
-        $range_bounds[1] = $2;
-    }
-    if ($str =~ /unit\s+(\S+)/) {
-        $unit = $1;
-    }
-}
-
 sub getline {  # returns empty string for end-of-file or fatal error
     my $in = shift;
     my $line = "";
     my $first = 1;
-    @range_bounds = ();
-    $unit = "";
     while (($l = <$in>)) {
         $line_number[$currfile]++;
         next if ($l =~ /^\s*$/);       # empty
-        if ($l =~ /^\s*\/\//) {        # comment
-            if ($l =~ /^\s*\/\/\#/) {   # special comment
-                $l =~ s@^\s*//\#\s*@@;
-                decode_special_comment $l;
-            }
-            next;
-        }
+        next if ($l =~ /^\s*\/\//);    # comment
         if ($in_comment) {
-            if ($l =~ /^\s*\#/) {   # special comment
-                $l =~ s/^\s*\#\s*//;
-                decode_special_comment $l;
+            if ($l =~ /\/\*/) {
+                error "nested comments not supported!";
             }
             next unless ($l =~ /\*\//);
             $in_comment = 0;     # end of multi-line comment
@@ -451,21 +430,14 @@ sub getline {  # returns empty string for end-of-file or fatal error
             next if ($l =~ /^\s*$/);
         } elsif ($l =~ /\/\*/) {       # start of multi-line comment
             if ($l =~ /\*\//) {
-                # remove end of comment, but leave comment text intact
-                $l =~ s/\s*\*\///;
+                # remove comment
+                $l =~ s/\/\*.*\*\///;
             } else {
                 $in_comment = 1;
+                # remove start of comment
+                $l =~ s/\/\*.*$//;
             }
-            if ($l =~ /#\s*(.*)/) {
-                decode_special_comment $1;
-            }
-            # next line removes start of comment and comment text
-            $l =~ s/\/\*.*$//;
             next if ($l =~ /^\s*$/);
-        }
-        $l =~ s/\s+$//;                # discard trailing whitespace
-        if ($l =~ /\/\/\#\s*(.*)$/) {  # special comment after IDL statement
-            decode_special_comment $1;
         }
         $l =~ s/\/\/.*$//;             # discard trailing comment
         $l =~ s/^\s+//;                # discard leading whitespace
@@ -479,8 +451,15 @@ sub getline {  # returns empty string for end-of-file or fatal error
         last if ($line =~ /^#/);   # preprocessor directive
         last if ($line =~ /[;"\{]$/);
     }
-    $line =~ s/unsigned +/unsigned_/;
-    $line =~ s/long +(long|double)/long_$1/;
+    if (! $l) {
+        print("eof seen\n") if ($verbose);
+    }
+    if ($in_comment) {
+        error "end of file reached while comment still open";
+        $in_comment = 0;
+    }
+    # $line =~ s/unsigned +/unsigned_/;
+    # $line =~ s/long\s+(long|double)\s+/long_$1 /;
     $line;
 }
 
@@ -498,7 +477,6 @@ sub idlsplit {
             $out[$ondx] .= $ch;
             if ($ch eq '"' and substr($str, $i-1, 1) ne "\\") {
                 $in_string = 0;
-                $ondx++;
             }
         } elsif ($ch eq '"') {
             $in_string = 1;
@@ -537,8 +515,7 @@ sub idlsplit {
     # 1. Turn extra-long and unsigned types into single keyword
     #      long double => long_double
     #      unsigned short => unsigned_short
-    # 2. Put scoped names back together, e.g. 'A' ':' ':' 'B' => 'A.B'
-    #    The notation A.B is borrowed from Ada.
+    # 2. Put scoped names back together, e.g. 'A' ':' ':' 'B' => 'A::B'
     #    Also, discard global-scope designators. (leading ::)
     # 3. Put the sign and value of negative numbers back together
     for ($i = 0; $i < $#out - 1; $i++) {
@@ -562,7 +539,7 @@ sub idlsplit {
                 if ($out[$i - 1] eq 'CORBA') {
                     $out[$i - 1] = $out[$i];   # discard CORBA namespace
                 } else {
-                    $out[$i - 1] .= '.' . $out[$i];
+                    $out[$i - 1] .= '::' . $out[$i];
                 }
                 splice @out, $i--, 1;
             }
@@ -576,10 +553,8 @@ sub idlsplit {
     for ($i = 0; $i < $#out - 1; $i++) {
         if ($out[$i] =~ /^w?string$/
             and $out[$i+1] eq '<' && $out[$i+3] eq '>') {
-            if ($out[$i+2] =~ /\D/) {
-                error "Non-numeric string bound is not yet implemented";
-            }
-            $out[$i] .= '<' . $out[$i + 2] . '>';
+            my $bound = $out[$i+2];
+            $out[$i] .= '<' . $bound . '>';
             splice @out, $i + 1, 3;
         }
     }
@@ -603,17 +578,12 @@ sub is_elementary_type {
         # numeric constant, but instead contains a reference to the defining
         # node.
         $rv = $tdesc;
-    } elsif (isnode($tdesc) && $recurse_into_typedef) {
-        if ($$tdesc[TYPE] == RANGEDEF) {
-            my @subord = @{$$tdesc[SUBORDINATES]};
-            # Call is_elementary_type again to get the code for the type.
-            $rv = is_elementary_type($subord[0], 1);
-        } elsif ($$tdesc[TYPE] == TYPEDEF) {
-            my @origtype_and_dim = @{$$tdesc[SUBORDINATES]};
-            my $dimref = $origtype_and_dim[1];
-            unless ($dimref && @{$dimref}) {
-                $rv = is_elementary_type($origtype_and_dim[0], 1);
-            }
+    } elsif ($recurse_into_typedef && isnode($tdesc) &&
+             $$tdesc[TYPE] == TYPEDEF) {
+        my @origtype_and_dim = @{$$tdesc[SUBORDINATES]};
+        my $dimref = $origtype_and_dim[1];
+        unless ($dimref && @{$dimref}) {
+            $rv = is_elementary_type($origtype_and_dim[0], 1);
         }
     }
     $rv;
@@ -632,62 +602,28 @@ sub predef_type {
         my $type;
         $type = ($1 eq "wstring" ? BOUNDED_WSTRING : BOUNDED_STRING);
         my $string_bound = $2;
-        my @typenode = ($type, $string_bound, 0, curr_scope);
-        return \@typenode;
+        return [ $type, $string_bound, 0, curr_scope ];
     }
     0;
 }
 
 
-sub typeof {      # Returns the string of a "type descriptor"
+sub typeof {      # Returns the string of a "type descriptor" in IDL syntax
     my $type = shift;
-    my $lang = LANG_IDL;    # language convention
     my $gen_scope = 0;       # generate scope-qualified name
-    my $scope_separator = "::";
     if (@_) {
-        $lang = shift;
-        if (@_) {
-            $gen_scope = shift;
-        }
-        if ($lang == LANG_C) {
-            $scope_separator = '_';
-        } elsif ($lang == LANG_ADA) {
-            $scope_separator = '.';
-        }
+        $gen_scope = shift;
     }
     my $rv = "";
     if ($type >= BOOLEAN && $type < NUMBER_OF_TYPES) {
-        if ($type == RANGEDEF) {
-            $type = TYPEDEF;
-        }
         $rv = $predef_types[$type];
         if ($type <= ANY) {
-            if ($lang == LANG_IDL) {
-                $rv =~ s/_/ /g;
-            } elsif ($lang == LANG_C) {
-                $rv = "CORBA_" . $rv;
-            } elsif ($lang == LANG_CPP) {
-                my @cpptype = qw/ none Boolean Octet Char WChar Short Long
-                                LongLong UShort ULong ULongLong Float Double
-                                LongDouble String WString Object TypeCode Any /;
-                $rv = "CORBA::" . $cpptype[$type];
-            } elsif ($lang == LANG_ADA) {
-                if ($type == WSTRING) {
-                    $rv = "CORBA.Wide_String";
-                } else {
-                    $rv =~ s/_(.)/_\u$1/g;
-                    $rv = "CORBA." . ucfirst($rv);
-                    if ($type == OBJECT) {
-                        $rv .= ".Ref";
-                    } elsif ($type == TYPECODE) {
-                        $rv .= ".Object";
-                    }
-                }
-            }
+            $rv =~ s/_/ /g;
         }
         return $rv;
     } elsif (! isnode($type)) {
         error "internal error: parameter to typeof is not a node ($type)\n";
+        return "";
     }
     my @node = @{$type};
     my $name = $node[NAME];
@@ -696,14 +632,14 @@ sub typeof {      # Returns the string of a "type descriptor"
         my @tmpnode = @node;
         my @scope;
         while ((@scope = @{$tmpnode[SCOPEREF]})) {
-            $prefix = $scope[NAME] . $scope_separator . $prefix;
+            $prefix = $scope[NAME] . "::" . $prefix;
             @tmpnode = @scope;
         }
         if (ref $gen_scope) {
             # @gen_scope contains the scope strings.
             # Now we can decide whether the scope prefix is needed.
-            my $curr_scope = join($scope_separator, @{$gen_scope});
-            if ($prefix eq ($curr_scope . $scope_separator)) {
+            my $curr_scope = join("::", @{$gen_scope});
+            if ($prefix eq "$curr_scope::") {
                 $prefix = "";
             }
         }
@@ -713,55 +649,22 @@ sub typeof {      # Returns the string of a "type descriptor"
         my @digits_and_scale = @{$node[SUBORDINATES]};
         my $digits = $digits_and_scale[0];
         my $scale = $digits_and_scale[1];
-        if ($lang == LANG_IDL) {
-            $rv = "fixed<$digits,$scale>";
-        } elsif ($lang == LANG_ADA) {
-            $rv = "Fixed_${digits}_$scale";
-        } else {
-            $rv = "TO_BE_DONE";
-        }
+        $rv = "fixed<$digits,$scale>";
     } elsif ($node[TYPE] == BOUNDED_STRING ||
              $node[TYPE] == BOUNDED_WSTRING) {
         my $wide = "";
         if ($node[TYPE] == BOUNDED_WSTRING) {
             $wide = "w";
         }
-        if ($lang == LANG_IDL) {
-            $rv = "${wide}string<" . $name . ">";
-        } elsif ($lang == LANG_ADA) {
-            if ($wide) {
-                $wide = "Wide_";
-            }
-            $rv = "CORBA.Bounded_${wide}String_$name\.Bounded_${wide}String";
-        } else {
-            $rv = "TO_BE_DONE";
-        }
+        $rv = "${wide}string<" . $name . ">";
     } elsif ($node[TYPE] == SEQUENCE) {
         my $bound = $name;   # NAME holds the bound
-        my $eltype = typeof($node[SUBORDINATES], $lang, $gen_scope);
-        if ($lang == LANG_IDL) {
-            $rv = 'sequence<' . $eltype;
-            if ($bound) {
-                $rv .= ", $bound";
-            }
-            $rv .= '>';
-        } elsif ($lang == LANG_ADA) {
-            if ($bound) {
-                $bound .= '_';
-            } else {
-                $bound = "";
-            }
-            $rv = "${prefix}IDL_SEQUENCE_$bound$eltype.Sequence";
-        } else {
-            $rv = "TO_BE_DONE";
+        my $eltype = typeof($node[SUBORDINATES], $gen_scope);
+        $rv = 'sequence<' . $eltype;
+        if ($bound) {
+            $rv .= ", $bound";
         }
-    } elsif ($node[TYPE] == INTERFACE || $node[TYPE] == INTERFACE_FWD) {
-        if ($lang == LANG_ADA) {
-            if ($node[TYPE] == INTERFACE_FWD) {
-                $rv .= "_Forward";
-            }
-            $rv .= ".Ref";
-        }
+        $rv .= '>';
     }
     $rv;
 }
@@ -769,17 +672,19 @@ sub typeof {      # Returns the string of a "type descriptor"
 
 sub check_name {
     my $name = shift;
-    my $opt_msg = "";
+    my $msg = "name";
     if (@_) {
-        $opt_msg = shift;
+        $msg = shift;
     }
-    if ($name =~ /[^a-z0-9_.]/i) {
-        if ($opt_msg) {
-            error("illegal " . $opt_msg);
-        } else {
-            error("illegal name");
-        }
+    unless (defined $name) {
+        error "missing name";
+    } elsif ($name !~ /^[a-z:]/i) {
+        error "illegal first character of $msg";
+    } elsif ($name =~ /[^a-z0-9_:\.]/i and not
+             $name =~ /^string<.*>$/) {
+        error "illegal $msg";
     }
+    $name;
 }
 
 
@@ -857,11 +762,30 @@ sub parse_type {
         my @digits_and_scale = ($digits, $scale);
         my @fixednode = (FIXED, "", \@digits_and_scale);
         $type = \@fixednode;
-    } elsif ($typename =~ /^(w?string)<(\d+)>$/) {   # bounded string
+    } elsif ($typename =~ /^(w?string)<(\w+)>$/) {   # bounded string
         my $t;
         $t = ($1 eq "wstring" ? BOUNDED_WSTRING : BOUNDED_STRING);
-        my $string_bound = $2;
-        my @bou_str_node = ($t, $string_bound, 0, curr_scope);
+        my $bound = $2;
+        if ($bound !~ /^\d/) {
+            my $boundtype = find_node($bound, $symtreeref);
+            if (isnode $boundtype) {
+                my @node = @{$boundtype};
+                if ($node[TYPE] == CONST) {
+                    my($basetype, $expr_ref) = @{$node[SUBORDINATES]};
+                    my @expr = @{$expr_ref};
+                    if (scalar(@expr) > 1 or $expr[0] !~ /^\d/) {
+                        error("string bound expressions"
+                              . " are not yet implemented");
+                    }
+                    $bound = $expr[0];
+                } else {
+                    error "illegal type for string bound";
+                }
+            } else {
+                error "Cannot resolve string bound";
+            }
+        }
+        my @bou_str_node = ($t, $bound, 0, curr_scope);
         $type = \@bou_str_node;
     } elsif ($typename eq 'sequence') {
         $type = parse_sequence($argref, $symtreeref);
@@ -909,12 +833,11 @@ sub parse_members {
             last if ($component_name eq '}');
             check_name($component_name);
             my @dimensions = ();
-            my $nxtarg;
+            my $nxtarg = "";
             while (@arg) {    # We're here for a variable's DIMENSIONS
                 $nxtarg = shift @arg;
                 if ($nxtarg eq '[') {
-                    my $dim = shift @arg;
-                    check_name($dim, "dimension");
+                    my $dim = check_name(shift @arg, "dimension");
                     if (shift @arg ne ']') {
                         error "expecting ']'";
                         return -1;
@@ -939,7 +862,7 @@ sub parse_members {
             last if ($nxtarg eq ';');
         }
     }
-    0;   # return value signals success with scope still open.
+    0   # return value signals success with scope still open.
 }
 
 
@@ -990,7 +913,7 @@ sub skip_input {
             my $directive = shift @arg;
             if ($count == 0 &&
                 ($directive eq 'else' || $directive eq 'endif')) {
-                return 1;
+                return;
             }
             if ($directive eq 'if' ||
                 $directive eq 'ifdef' ||
@@ -1001,17 +924,16 @@ sub skip_input {
             }
         }
     }
-    0;
+    error "skip_input: fell off end of file";
 }
 
 
 sub isname {
-    shift =~ /^[A-Za-z]/;
+    my $txt = shift;
+    $txt =~ /^[A-Za-z]/
 }
 
 sub Parse_File {
-    # Returns a reference to the symbol node array of the outermost
-    # declarations encountered.
     my $file = shift;
     my $input_filehandle = "";
     my $abstract = 0;
@@ -1090,7 +1012,7 @@ sub Parse_File {
                     shift @arg;   # discard open-paren
                     $symbol = shift @arg;
                     if ($#arg) {  # there's more than the closing-paren
-                        print STDERR "warning: #if not yet fully implemented\n";
+                        warn "warning: #if not yet fully implemented\n";
                     } else {
                         skip_input unless (exists $defines{$symbol});
                     }
@@ -1099,7 +1021,7 @@ sub Parse_File {
                         skip_input;
                     }
                 } elsif ($symbol !~ /^\d+$/) {
-                    print STDERR "warning: #if expressions not yet implemented\n";
+                    warn "warning: #if expressions not yet implemented\n";
                 }
             } elsif ($directive eq 'ifdef') {
                 my $symbol = shift @arg;
@@ -1118,7 +1040,7 @@ sub Parse_File {
                     print("// defining $symbol as $value\n") if ($verbose);
                 }
                 if (exists $defines{$symbol}) {
-                    print STDERR "info: redefining $symbol\n";
+                    warn "info: redefining $symbol\n";
                 }
                 $defines{$symbol} = $value;
             } elsif ($directive eq 'undef') {
@@ -1154,7 +1076,7 @@ sub Parse_File {
                     @pragma_node = (PRAGMA_ID, $unitname, $idstring,
                                     curr_scope);
                 } else {
-                    print STDERR "unknown \#pragma $directive\n";
+                    warn "unknown \#pragma $directive\n";
                     next;
                 }
                 push @symbols, \@pragma_node;
@@ -1171,6 +1093,7 @@ sub Parse_File {
                         $filename = substr($filename, 0, length($filename) - 1);
                     }
                 }
+                $filename =~ s/\\/\//g;
                 my $incfile_contents_ref;
                 if (exists $includetree{$filename}) {
                     $incfile_contents_ref = $includetree{$filename};
@@ -1220,7 +1143,7 @@ sub Parse_File {
             } elsif ($directive eq 'else') {
                 skip_input;
             } elsif ($directive ne 'endif') {
-                print STDERR "ignoring preprocessor directive \#$directive\n";
+                warn "ignoring preprocessor directive \#$directive\n";
             }
             next;
 
@@ -1253,8 +1176,7 @@ sub Parse_File {
             next;
 
         } elsif ($kw eq 'module') {
-            my $name = shift @arg;
-            check_name $name;
+            my $name = check_name(shift @arg);
             error("expecting '{'") if (shift(@arg) ne '{');
             my @symnode = (MODULE, $name, 0, curr_scope);
             push @symbols, \@symnode;
@@ -1268,8 +1190,7 @@ sub Parse_File {
             next;
 
         } elsif ($kw eq 'interface') {
-            my $name = shift @arg;
-            check_name $name;
+            my $name = check_name(shift @arg);
             my @symnode = (INTERFACE, $name, 0, curr_scope);
             my $lasttok = pop(@arg);
             if ($lasttok eq ';') {
@@ -1298,8 +1219,7 @@ sub Parse_File {
                     next;
                 }
                 for ($i = 0; $i < @arg; $i++) {
-                    my $name = $arg[$i];
-                    check_name($name, "ancestor name");
+                    my $name = check_name($arg[$i], "ancestor name");
                     my $ancestor_node = find_node($name, \@symbols);
                     if (! $ancestor_node) {
                         error "could not find ancestor $name";
@@ -1335,8 +1255,7 @@ sub Parse_File {
             goto KEYWORD;
 
         } elsif ($kw eq 'valuetype') {
-            my $name = shift @arg;
-            check_name $name;
+            my $name = check_name(shift @arg);
             my @symnode = (VALUETYPE, $name, 0, curr_scope);
             my $nxttok = shift @arg;
             if ($nxttok eq ';') {
@@ -1388,12 +1307,13 @@ sub Parse_File {
                     error "expecting '{' at valuetype declaration";
                 }
                 $vt_inheritance[1] = [ @ancestors ];
-            } elsif (isname $nexttok) {
+            } elsif (isname $nxttok) {
                 # suspect a value box
                 my $type = parse_type($nxttok, \@arg, \@symbols);
                 if ($type) {
                     $symnode[TYPE] = VALUETYPE_BOX;
                     $symnode[SUBORDINATES] = $type;
+                    push @symbols, \@symnode;
                 } else {
                     error "value box: unknown type $nxttok";
                 }
@@ -1421,8 +1341,11 @@ sub Parse_File {
                 if ($arg[0] eq '}' or
                         parse_members(\@symbols, \@arg, \@struct) == 1) {
                     # end of type declaration was encountered
-                    my @node = (VALUETYPE, $name, [ @struct ], curr_scope);
-                    push @symbols, \@node;
+                    my @obvsub = ($abstract, [ @vt_inheritance ], [ @struct ]);
+                    $symnode[SUBORDINATES] = \@obvsub;
+                    push @symbols, \@symnode;
+                    $abstract = 0;
+                    @vt_inheritance = (0, 0);
                     pop @namestack;
                     pop @typestack;
                     @struct = ();
@@ -1434,8 +1357,7 @@ sub Parse_File {
         } elsif ($kw eq 'struct' or $kw eq 'exception') {
             my $type;
             $type = ($kw eq 'struct' ? STRUCT : EXCEPTION);
-            my $name = shift @arg;
-            check_name $name;
+            my $name = check_name(shift @arg);
             if (shift @arg ne '{') {
                 error "expecting '{'";
                 next;
@@ -1458,8 +1380,7 @@ sub Parse_File {
 
         } elsif ($kw eq 'union') {
             push @typestack, UNION;
-            my $typename = shift @arg;
-            check_name($name, "type name");
+            my $typename = check_name(shift @arg, "type name");
             push @namestack, $typename;
             if (shift(@arg) ne 'switch') {
                 error "union: expecting keyword 'switch'";
@@ -1489,11 +1410,6 @@ sub Parse_File {
             error("expecting '{'") if (shift @arg ne '{');
             error("ignoring excess characters") if (@arg);
             @struct = ($switchtype);
-            if ($union_switchname ne "") {
-                my @switchnamenode = (SWITCHNAME, $union_switchname, 0);
-                push @struct, \@switchnamenode;
-                $union_switchname = "";
-            }
             next;
         }
 
@@ -1502,7 +1418,12 @@ sub Parse_File {
             next;
         }
 
-        if ($kw eq 'const') {
+        if ($kw eq 'native') {
+            my $name = check_name(shift @arg, "type name");
+            my @node = (NATIVE, $name, 0, curr_scope);
+            push @symbols, \@node;
+
+        } elsif ($kw eq 'const') {
             my $type = shift @arg;
             my $name = shift @arg;
             if (shift(@arg) ne '=') {
@@ -1514,7 +1435,7 @@ sub Parse_File {
             my @tuple = ($typething, [ @arg ]);
             if (isnode $typething) {
                 my $id = ${$typething}[TYPE];
-                if ($id < ENUM || $id > RANGEDEF) {
+                if ($id < ENUM || $id > TYPEDEF) {
                     error "expecting type";
                     next;
                 }
@@ -1523,16 +1444,14 @@ sub Parse_File {
             push @symbols, \@symnode;
 
         } elsif ($kw eq 'typedef') {
-            my $oldtype = shift @arg;
-            # check_name($oldtype, "name of original type");
+            my $oldtype = check_name(shift @arg, "name of original type");
             # TO BE DONE: oldtype is STRUCT or UNION
             my $existing_typenode = parse_type($oldtype, \@arg, \@symbols);
             if (! $existing_typenode) {
                 error "unknown type $oldtype";
                 next;
             }
-            my $newtype = shift @arg;
-            check_name($newtype, "name of newly defined type");
+            my $newtype = check_name(shift @arg, "name of newly defined type");
             my @dimensions = ();
             while (@arg) {
                 if (shift(@arg) ne '[') {
@@ -1545,25 +1464,8 @@ sub Parse_File {
                     error "expecting ']'";
                 }
             }
-            my $type;
-            my @subord;
-            if (scalar(@range_bounds) || $is_subtype) {
-                $type = RANGEDEF;
-                my $min = "";
-                my $max = "";
-                if (scalar(@range_bounds)) {
-                    $min = $range_bounds[0];
-                    $max = $range_bounds[1];
-                    @range_bounds = ();
-                }
-                @subord = ($existing_typenode, $is_subtype,
-                           $min, $max, $unit);
-                $is_subtype = 0;
-            } else {
-                $type = TYPEDEF;
-                @subord = ($existing_typenode, [ @dimensions ]);
-            }
-            my @node = ($type, $newtype, \@subord, curr_scope);
+            my @subord = ($existing_typenode, [ @dimensions ]);
+            my @node = (TYPEDEF, $newtype, \@subord, curr_scope);
             push @symbols, \@node;
 
         } elsif ($kw eq 'case' or $kw eq 'default') {
@@ -1608,8 +1510,7 @@ sub Parse_File {
             }
 
         } elsif ($kw eq 'enum') {
-            my $typename = shift @arg;
-            check_name($typename, "type name");
+            my $typename = check_name(shift @arg, "type name");
             if (shift @arg ne '{') {
                 error("expecting '{'");
                 next;
@@ -1620,7 +1521,7 @@ sub Parse_File {
             my @values = ();
             my $repres_given = grep(/=/, @arg);
             if ($repres_given) {
-                print STDERR ("warning - $typename: enum representations " .
+                warn ("warning - $typename: enum representations " .
                               " are a non-standard extension\n");
             }
             my $natural_rep = 0;
@@ -1663,8 +1564,7 @@ sub Parse_File {
                 next;
             }
             my @subord = ($readonly, $type);
-            my $name = shift @arg;
-            check_name $name;
+            my $name = check_name(shift @arg);
             my @node = (ATTRIBUTE, $name, \@subord, curr_scope);
             if ($in_valuetype) {
                 my @value_member = (0, \@node);
@@ -1695,8 +1595,7 @@ sub Parse_File {
                 }
             }
             @subord = ($rettype);
-            my $name = shift @arg;
-            check_name($name, "method name");
+            my $name = check_name(shift @arg, "method name");
             if (shift(@arg) ne '(') {
                 error "expecting opening parenthesis";
                 next;
@@ -1735,7 +1634,9 @@ sub Parse_File {
                 my @param_node = ($ptype, $pname);
                 push @param_node, $pmode;
                 push @subord, \@param_node;
-                shift @arg if ($arg[0] eq ',');
+                if (@arg and $arg[0] eq ',') {
+                    shift @arg;
+                }
             }
             my @node = (METHOD, $name, \@subord, curr_scope);
             if ($in_valuetype) {
@@ -1831,15 +1732,19 @@ sub isnode {
 
 sub is_scope {
     my $thing = shift;
-    (isnode $thing and
-     $$thing[TYPE] == MODULE or $$thing[TYPE] == INTERFACE);
+    my $rv = 0;
+    if (isnode $thing) {
+        my $type = $$thing[TYPE];
+        $rv = ($type == MODULE || $type == INTERFACE);
+    }
+    $rv;
 }
 
 
 sub find_node_recursive {   # auxiliary to find_node()
     my ($name, $root) = @_;
-    my $dot = index $name, '.';
-    if ($dot < 0) {
+    my $sep = index $name, '::';
+    if ($sep < 0) {
         while ($root) {
             if (isnode $root and $name eq $$root[NAME]) {
                 return $root;
@@ -1871,8 +1776,8 @@ sub find_node_recursive {   # auxiliary to find_node()
         }
         return 0;
     }
-    my $this_prefix = substr($name, 0, $dot);
-    $name = substr($name, $dot + 1);
+    my $this_prefix = substr($name, 0, $sep);
+    $name = substr($name, $sep + 2);
     while ($root) {
         if (isnode $root and $$root[NAME] eq $this_prefix) {
             return find_node_recursive($name, $root);
@@ -1909,6 +1814,16 @@ sub find_node_recursive {   # auxiliary to find_node()
 }
  
 
+# Return the names of the nodes in @scopestack as a list.
+sub scope_names {
+    my @names = ();
+    foreach $noderef (@scopestack) {
+        push @names, $$noderef[NAME];
+    }
+    @names;
+}
+
+
 sub find_node {
     # Returns a reference to the defining node, or a type id value
     # if the name given is a CORBA predefined type name.
@@ -1917,6 +1832,20 @@ sub find_node {
     my $predef_type_id = predef_type($name);
     if ($predef_type_id) {
         return $predef_type_id;
+    }
+    my @namecomponents = split(/::/, $name);
+    my $nseps = scalar(@namecomponents) - 1;
+    if ($nseps) {
+        # Discard same-scope prefix.
+        my $given_prefix = $name;
+        $given_prefix =~ s/::\w+$//;
+        my @scopes = scope_names;
+        if (scalar(@scopes) >= $nseps) {
+            my $current_prefix = join("::", splice(@scopes, -$nseps));
+            if ($given_prefix eq $current_prefix) {
+                $name =~ s/^.*:://;
+            }
+        }
     }
     my $result_node_ref = find_node_recursive($name, $current_symtree_ref);
     if ($result_node_ref) {
@@ -1935,7 +1864,7 @@ sub find_node {
 
 sub error {
     my $message = shift;
-    print STDERR ($infilename[$currfile]  . " line " . $line_number[$currfile]
+    warn ($infilename[$currfile]  . " line " . $line_number[$currfile]
                   . ": $message\n");
     $n_errors++;
 }
@@ -1959,31 +1888,15 @@ sub dsdent {
 my @dscopes;   # List of scope strings; auxiliary to sub dstypeof
 
 sub dstypeof {
-    typeof(shift, LANG_IDL, \@dscopes);
+    typeof(shift, \@dscopes);
 }
 
-$gsearch_symbol = "";
-$gsearch_result = 0;
 my $dsymroot = 0;
-
-sub search_enum_type {
-    my $symroot = shift;
-    my $scope = shift;
-    my $inside_includefile = shift;
-    if (! isnode($symroot)) {
-        return;
-    }
-    my @node = @{$symroot};
-    if ($node[TYPE] == ENUM && $gsearch_symbol eq $node[NAME]) {
-        $gsearch_result = $symroot;
-    }
-}
-
 
 sub dump_symbols_internal {
     my $sym_array_ref = shift;
     if (! $sym_array_ref) {
-        print STDERR "dump_symbols_internal: empty elem (returning)\n";
+        warn "dump_symbols_internal: empty elem (returning)\n";
         return;
     }
     if (not isnode $sym_array_ref) {
@@ -2090,7 +2003,7 @@ sub dump_symbols_internal {
             my ($memberkind, $member) = @{$memberinfo};
             my @member = @{$member};
             my $mname = $member[NAME];
-            my $mtype = typeof($member[TYPE]);
+            my $mtype = dstypeof($member[TYPE]);
             if ($memberkind == PRIVATE) {
                 dsdent "private $mtype $mname;\n";
                 next;
@@ -2102,14 +2015,14 @@ sub dump_symbols_internal {
             my @subord = @{$member[SUBORDINATES]};
             if ($member[TYPE] == ATTRIBUTE) {
                 my $readonly = $subord[0];
-                my $rettype = typeof($subord[1]);
+                my $rettype = dstypeof($subord[1]);
                 dsdent;
                 if ($readonly) {
                     dsemit "readonly ";
                 }
                 dsemit "attribute $rettype $mname;\n";
             } else {  # METHOD
-                dsdent typeof(shift @subord);
+                dsdent dstypeof(shift @subord);
                 dsemit " $mname (";
                 my $first = 1;
                 foreach $param (@arg) {
@@ -2120,7 +2033,7 @@ sub dump_symbols_internal {
                         dsemit ", ";
                     }
                     dsemit(($m == &IN) ? "in" : ($m == &OUT) ? "out" : "inout");
-                    dsemit(" " . typeof($$param[TYPE]) . " $$param[NAME]");
+                    dsemit(" " . dstypeof($$param[TYPE]) . " $$param[NAME]");
                 }
                 dsemit ");\n";
             }
@@ -2164,20 +2077,7 @@ sub dump_symbols_internal {
         dsemit(dstypeof($origtype) . " $name");
         if ($dimref and @{$dimref}) {
             foreach $dim (@{$dimref}) {
-                my $dimstring = $dim;
-                unless ($dimstring !~ /\D/) {   # unless the dim is a number
-                    # As a special extension, we allow an enum typename
-                    # for the array size indication.
-                    $gsearch_symbol = $dimstring;
-                    $gsearch_symbol =~ s/^.*\.//;
-                    $gsearch_result = 0;
-                    traverse_tree($dsymroot, \&search_enum_type, 1);
-                    if ($gsearch_result) {
-                        $dimstring = scalar(@{$$gsearch_result[SUBORDINATES]});
-                    }
-                    $dimstring =~ s/\./::/g;
-                }
-                dsemit('[' . $dimstring . ']');
+                dsemit "[$dim]";
             }
         }
     } elsif ($type == CONST) {
@@ -2243,7 +2143,7 @@ sub dump_symbols_internal {
     } elsif ($type == INTERFACE_FWD) {
         dsemit $name;
     } else {
-        print STDERR "Dump_Symbols: unknown type value $type\n";
+        warn "Dump_Symbols: unknown type value $type\n";
     }
     dsemit ";\n\n";
 }
@@ -2262,7 +2162,7 @@ my $traverse_includefiles = 0;
 sub traverse {
     my ($symroot, $scope, $inside_includefile) = @_;
     if (! $symroot) {
-        print STDERR "\ntraverse_tree: encountered empty elem (returning)\n";
+        warn "\ntraverse_tree: encountered empty elem (returning)\n";
         return;
     } elsif (is_elementary_type $symroot) {
         &{$user_sub_ref}($symroot, $scope, $inside_includefile);
@@ -2283,7 +2183,7 @@ sub traverse {
         traverse($subord, $scope, 1) if ($traverse_includefiles);
     } elsif ($type == MODULE) {
         if ($scope) {
-            $scope .= '.' . $name;
+            $scope .= '::' . $name;
         } else {
             $scope = $name;
         }
@@ -2300,7 +2200,7 @@ sub traverse {
         shift @arg;   # discard ancestors
         shift @arg;   # discard abstract flag
         if ($scope) {
-            $scope .= '.' . $name;
+            $scope .= '::' . $name;
         } else {
             $scope = $name;
         }
