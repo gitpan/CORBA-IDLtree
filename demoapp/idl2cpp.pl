@@ -1,6 +1,6 @@
 # idl2cpp.pl ################################################################
 # This code is distributed under the same terms as Perl itself.
-# Copyright/author:  (C) 2002, Oliver M. Kellogg (gnack@adapower.com)
+# Copyright/author:  (C) 2003, O. Kellogg (okellogg@users.sourceforge.net)
 #
 $Version = '0.0';
 #
@@ -449,6 +449,18 @@ sub idl2cpp {
         $indentlevel--;
         dent "};\n\n";
         return;
+    } elsif ($type == CORBA::IDLtree::REMARK) {
+        my @comment = @$name;
+        if (scalar(@comment) == 1) {
+            dent("//" . $comment[0] . "\n\n");
+        } else {
+            dent "/*\n";
+            foreach (@comment) {
+                dent "$_\n";
+            }
+            dent " */\n\n";
+        }
+        return;
     }
     dent(typeof($type) . " ");
     if ($type == CORBA::IDLtree::TYPEDEF) {
@@ -535,6 +547,7 @@ sub idl2cpp {
 
 # Main program
 
+$CORBA::IDLtree::enable_comments = 1;
 foreach $arg (@ARGV) {
     if ($arg =~ /^-/) {
         for (substr($arg, 1)) {

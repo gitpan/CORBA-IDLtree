@@ -1,11 +1,21 @@
 # CORBA/IDLtree.pm   IDL to symbol tree translator
 # This module is distributed under the same terms as Perl itself.
-# Copyright/author:  (C) 1998-2002, Oliver M. Kellogg
+# Copyright/author:  (C) 1998-2003, Oliver M. Kellogg
 # Contact:           okellogg@users.sourceforge.net
-# 
+#
 # -----------------------------------------------------------------------------
 # Ver. |   Date   | History
 # -----+----------+------------------------------------------------------------
+#  1.4  2003/07/25  Implemented #elif in the emulated preprocessor and fixed
+#                   the handling of preprocessor conditions.
+#                   Changed the COMMENT element of the node structure to only
+#                   contain the post-comment. Turned the former pre-comment
+#                   into an independent node, REMARK. See documentation below.
+#                   Added global switch $cache_trees.  It buys speed when
+#                   submitting related IDL files to consecutive Parse_File
+#                   calls by saving and reusing the trees built for #included
+#                   files.  CAVEAT: The redefinition of #defined symbols
+#                   is flagged as an error when using this switch.
 #  1.3  2002/12/01  #include statements that appear at places other than
 #                   the global scope are no longer made into INCFILE nodes;
 #                   instead, the included file is parsed inline.
@@ -76,12 +86,12 @@
 #                   Removed the %Prefixes hash that is thus obsolete.
 #                   Replaced sub check_scope by sub curr_scope.
 #  0.3  1999/04/11  Added a node for pragma prefix
-#  0.2  1999/04/06  Minor cosmetic changes; tested subs traverse_tree 
+#  0.2  1999/04/06  Minor cosmetic changes; tested subs traverse_tree
 #                   and traverse (for usage example, see idl2ada.pl)
 #                   Preprocessor directives other than #include were
 #                   actually mistreated (fixed so they are just ignored.)
 #  0.1  1998/07/06  Corrected the first parameter to the check_scope call
-#                   in process_members. 
+#                   in process_members.
 #                   The two elements of @tuple in 'const' processing were
 #                   the wrong way round, corrected that.
 #                   Overhauled the explanation of the Symbol Tree which was
@@ -114,7 +124,8 @@ require Exporter;
 @EXPORT = ();
 @EXPORT_OK = ();  # &Parse_File, &Dump_Symbols, and all the constants subs
 
-use vars qw(@include_path %defines);
+use vars qw(@include_path %defines $support_module_reopening $cache_trees
+            $n_errors $enable_comments $enable_enum_comments);
 
 use strict 'vars';
 
@@ -156,7 +167,7 @@ use strict 'vars';
 #   INTERFACE_FWD   Reference to the node of the full interface declaration.
 #
 #   STRUCT or       Reference to an array of node references representing the
-#   EXCEPTION       member components of the struct or exception.   
+#   EXCEPTION       member components of the struct or exception.
 #                   Each member representative node is a quadruplet consisting
 #                   of (TYPE, NAME, <dimref>, COMMENT).
 #                   The <dimref> is a reference to a list of dimension numbers,
@@ -174,6 +185,18 @@ use strict 'vars';
 #                   For DEFAULT, both the NAME and the SUBORDINATE are unused.
 #
 #   ENUM            Reference to the array of enum value literals.
+#                   If the global variable $enable_enum_comments is set then
+#                   the elements in the array may be shaped differently:
+#                   - If the enum literal is not followed by a comment then
+#                     the element in the array is the enum literal as usual.
+#                   - If the enum literal is followed by a comment then the
+#                     element in the array is a reference to a tuple. In this
+#                     tuple, the first element is the enum literal, and the
+#                     second element is a reference to the comment list.
+#                     Thus, when generating code for the literals, it is
+#                     recommended to use the `ref' predicate to find out
+#                     which of the two alternatives is in effect for each
+#                     array element.
 #
 #   TYPEDEF         Reference to a two-element array: element 0 contains a
 #                   reference to the type descriptor of the original type;
@@ -181,11 +204,11 @@ use strict 'vars';
 #                   numbers, or the null value if no dimensions are given.
 #
 #   SEQUENCE        As a special case, the NAME element of a SEQUENCE node
-#                   does not contain a name (as sequences are anonymous 
+#                   does not contain a name (as sequences are anonymous
 #                   types), but instead is used to hold the bound number.
 #                   If the bound number is 0, then it is an unbounded
 #                   sequence. The SUBORDINATES element contains the type
-#                   descriptor of the base type of the sequence. This 
+#                   descriptor of the base type of the sequence. This
 #                   descriptor could itself be a reference to a SEQUENCE
 #                   defining node (that is, a nested sequence definition.)
 #                   Bounded strings are treated as a special case of sequence.
@@ -217,11 +240,12 @@ use strict 'vars';
 #                                 type) may be FACTORY.
 #                          [1] => reference to the defining node.
 #                                 In case of PRIVATE or PUBLIC state member,
-#                                 the defining node is a triple (3-element
-#                                 list) containing:
-#                                 [0] => member type id
-#                                 [1] => member name
-#                                 [2] => dimensions
+#                                 the defining node is the same as for STRUCT
+#                                 subordinates, namely a quadruplet containing:
+#                                  [0] => member type id
+#                                  [1] => member name
+#                                  [2] => dimref (reference to dimensions list)
+#                                  [3] => COMMENT element
 #
 #   VALUETYPE_BOX   Reference to the defining type node.
 #
@@ -261,15 +285,20 @@ use strict 'vars';
 #                   holds a reference to all further text appearing after
 #                   the pragma name, if any.
 #
+#   REMARK          The SUBORDINATES of the node is unused.
+#                   The NAME component contains a reference to a list of
+#                   comment lines. In the case of a single-line comment, the
+#                   list will contain only one element; in case of multi-
+#                   line comments, each line is represented by a list entry.
+#                   The lines in this list are not newline terminated; empty
+#                   entries represent empty comment lines.
 #
-# The COMMENT element holds the comment text that precedes an IDL item,
-# or appears on the same line as the IDL item.
-# Note that comments that relate to an IDL item, but appear on lines
-# *after* the IDL item, are not handled correctly: They are associated with
-# the following IDL item. Comment text appearing after the last IDL item
-# is lost.
-# The comment text is stored as a list to accomodate multi-line comments.
-# The lines in this list are not newline terminated. The COMMENT field is a 
+#
+# The COMMENT element holds the comment text that follows the IDL declaration
+# on the same line. Usually this is just a single line. However, if a multi-
+# line comment is started on the same line after a declaration, the multi-line
+# comment may extend to further lines - therefore we use a list of lines.
+# The lines in this list are not newline terminated. The COMMENT field is a
 # reference to this list, or contains the value 0 if no comment is present
 # at the IDL item.
 #
@@ -293,6 +322,12 @@ sub Parse_File;
 # User definable auxiliary data for Parse_File:
 @include_path = ();     # Paths where to look for included IDL files
 %defines = ();          # Symbol definitions for preprocessor
+$support_module_reopening = 0;  # By default, do not support module reopening
+$cache_trees = 0;       # By default, do not cache trees of #included files
+$enable_comments = 0;   # By default, do not generate REMARK nodes.
+$enable_enum_comments = 0;  # By default, do not promote enum literal comments
+                            # into the ENUM subordinates.
+$n_errors = 0;          # Cumulative number of errors for a Parse_File call.
 
 my %active_defines = ();
 
@@ -302,7 +337,7 @@ sub Dump_Symbols;
 
 sub Version ()
 {
-    for ('$Revision: 1.60 $') { #'){
+    for ('$Revision: 1.83 $') { #'){
         /: *(\S+)/ and return $1;
     }
     return "(undefined)";
@@ -374,7 +409,8 @@ sub PRAGMA_PREFIX ()   { 44 }  # node
 sub PRAGMA_VERSION ()  { 45 }  # node
 sub PRAGMA_ID ()       { 46 }  # node
 sub PRAGMA ()          { 47 }  # node
-sub NUMBER_OF_TYPES () { 48 }
+sub REMARK ()          { 48 }  # node
+sub NUMBER_OF_TYPES () { 49 }
 
 # Valuetype flag values
 sub ABSTRACT      { 1 }
@@ -388,10 +424,10 @@ sub PUBLIC        { 2 }
 
 sub is_elementary_type;
 sub predef_type;
-sub isnode;                   # Given a "thing", returns 1 if it is a 
+sub isnode;                   # Given a "thing", returns 1 if it is a
                               #  reference to a node, 0 otherwise.
 sub is_scope;                 # Given a "thing", returns 1 if it's a ref
-                              #  to a module or interface node.
+                              #  to a MODULE, INTERFACE, or INCFILE node.
 sub find_node;                # Looks up a name in the symbol tree(s)
                               #  constructed so far.
                               #  Returns the node ref if found, else 0.
@@ -421,7 +457,8 @@ sub files_included;      # Returns an array with the names of files #included.
 
 # Internal subroutines (should not be visible)
 
-sub getline;
+sub get_items;
+sub unget_items;
 sub is_valid_identifier;
 sub check_name;
 sub curr_scope;
@@ -431,6 +468,7 @@ sub parse_sequence;
 sub parse_type;
 sub parse_members;
 sub error;
+sub info;
 sub abort;
 sub cvt_expr;
 sub require_end_of_stmt;
@@ -442,20 +480,21 @@ sub dump_symbols_internal;
 
 # The @predef_types array must have the types in the same order as
 # the numeric order of type identifying constants defined above.
-my @predef_types = qw/ none boolean octet char wchar short long long_long 
+my @predef_types = qw/ none boolean octet char wchar short long long_long
                        unsigned_short unsigned_long unsigned_long_long
-                       float double long_double string wstring Object 
+                       float double long_double string wstring Object
                        TypeCode any fixed bounded_string bounded_wstring
                        sequence enum typedef native struct union case default
-                       exception const module interface interface_fwd 
+                       exception const module interface interface_fwd
                        valuetype valuetype_fwd valuetype_box
-                       attribute oneway void factory method 
+                       attribute oneway void factory method
                        include pragma_prefix pragma_version pragma_id pragma /;
 my @infilename = ();    # infilename and line_number move in parallel.
 my @line_number = ();
-my $n_errors = 0;       # auxiliary to sub error
-my @comment = ();       # Auxiliary to comment processing
-my $in_comment = 0;     # Auxiliary to multi-line comment processing
+my @remark = ();        # Auxiliary to comment processing
+my @post_comment = ();  # Auxiliary to comment processing
+my @global_items = ();  # Auxiliary to sub unget_items
+my %findnode_cache = (); # Auxiliary to find_node_i(): cache for lookups
 my $in_valuetype = 0;   # Auxiliary to valuetype processing
 my $abstract = 0;
 my $currfile = -1;
@@ -480,87 +519,6 @@ sub locate_executable {
     $fully_qualified_name;
 }
 
-
-sub getline {  # returns empty string for end-of-file or fatal error
-    my $in = shift;
-    my $line = "";
-    my $first = 1;
-    my $l;
-    @comment = ();
-    while (($l = <$in>)) {
-        $line_number[$currfile]++;
-        chomp $l;
-        if ($l =~ /^\s*$/) {           # empty
-            if ($in_comment) {
-               push @comment, "";
-            }
-            next;
-        }
-        if ($l =~ /^\s*\/\/\s*(.*)/) {        # single-line comment
-            my $cmnt = $1;
-            if ($cmnt) {
-                push @comment, $cmnt;
-            }
-            next;
-        }
-        if ($in_comment) {
-            if ($l =~ /\/\*/) {
-                error "nested comments not supported!";
-            }
-            my $endindex = index($l, '*/');
-            if ($endindex >= 0) {
-                my $cmnt = $l;
-                $cmnt =~ s/\*\/.*$//;
-                push @comment, $cmnt;
-                $in_comment = 0;     # end of multi-line comment
-                $l =~ s/^.*\*\///;
-                next if ($l =~ /^\s*$/);
-            } else {
-                push @comment, $l;
-                next;
-            }
-        } elsif ($l =~ /\/\*/) {       # start of multi-line comment
-            my $cmnt = $l;
-            $cmnt =~ s/^.*\/\*//;  # remove comment beginning /*
-            $cmnt =~ s/\*\/.*$//;  # remove comment end (if any) */
-            push @comment, $cmnt;
-            if ($l =~ /\*\//) {
-                # remove comment
-                $l =~ s/\/\*.*\*\///;
-            } else {
-                $in_comment = 1;
-                # remove start of comment
-                $l =~ s/\/\*.*$//;
-            }
-            next if ($l =~ /^\s*$/);
-        }
-        if ($l =~ /\/\/\s*(.*)$/) {
-            my $cmnt = $1;
-            if ($cmnt) {
-                push @comment, $cmnt;
-            }
-            $l =~ s/\/\/.*$//;         # discard trailing comment
-        }
-        $l =~ s/^\s+//;                # discard leading whitespace
-        $l =~ s/\s+$//;                # discard trailing whitespace
-        if ($first) {
-            $first = 0;
-        } else {
-            $line .= ' ';
-        }
-        $line .= $l;
-        last if ($line =~ /^#/);   # preprocessor directive
-        last if ($line =~ /[;"\{]$/); #"
-        if ($line =~ /:$/) {
-            last;
-        }
-    }
-    if (! $l && $in_comment) {
-        error "end of file reached while comment still open";
-        $in_comment = 0;
-    }
-    $line;
-}
 
 sub idlsplit {
     my $str = shift;
@@ -597,10 +555,13 @@ sub idlsplit {
             $out[$ondx] .= $ch;
         } elsif ($in_lit) {
             $in_lit = 0;
-            if ($emucpp) {
-                # do preprocessor substitution
-                if (exists $active_defines{$out[$ondx]}) {
-                    $out[$ondx] = $active_defines{$out[$ondx]};
+            # do preprocessor substitution
+            if (exists $active_defines{$out[$ondx]}) {
+                my $value = $active_defines{$out[$ondx]};
+                if ("$value" ne "") {
+                    my @addl = idlsplit($value);
+                    push @out, @addl;
+                    $ondx = $#out;
                 }
             }
             if ($ch !~ /\s/) {
@@ -739,6 +700,15 @@ sub curr_scope {
 }
 
 
+sub comment {
+    my $cmnt = 0;
+    if (@post_comment) {
+        $cmnt = [ @post_comment ];
+    }
+    $cmnt
+}
+
+
 sub parse_sequence {
     my ($argref, $symroot) = @_;
     if (shift @{$argref} ne '<') {
@@ -770,7 +740,7 @@ sub parse_sequence {
         error "expecting '<'";
         return 0;
     }
-    my @node = (SEQUENCE, $bound, $type, [ @comment ], curr_scope);
+    my @node = (SEQUENCE, $bound, $type, comment, curr_scope);
     \@node;
 }
 
@@ -802,7 +772,7 @@ sub parse_type {
             return 0;
         }
         my @digits_and_scale = ($digits, $scale);
-        $type = [ FIXED, "", \@digits_and_scale, [ @comment ], curr_scope ];
+        $type = [ FIXED, "", \@digits_and_scale, comment, curr_scope ];
     } elsif ($typename =~ /^(w?string)<(\w+)>$/) {   # bounded string
         my $t;
         $t = ($1 eq "wstring" ? BOUNDED_WSTRING : BOUNDED_STRING);
@@ -826,7 +796,7 @@ sub parse_type {
                 error "Cannot resolve string bound";
             }
         }
-        $type = [ $t, $bound, 0, [ @comment ], curr_scope ];
+        $type = [ $t, $bound, 0, comment, curr_scope ];
     } elsif ($typename eq 'sequence') {
         $type = parse_sequence($argref, $symtreeref);
     } else {
@@ -837,17 +807,13 @@ sub parse_type {
 
 
 sub parse_members {
-    # params:   \@symbols, \@arg, \@struct (, opt: $comment_ref)
+    # params:   \@symbols, \@arg, \@struct
     # returns:  -1 for error;
     #            0 for success with enclosing scope still open;
     #            1 for success with enclosing scope closed (i.e. seen '};')
     my $symtreeref = shift;
     my $argref = shift;
     my $structref = shift;
-    my $commentref = 0;
-    if (@_) {
-        $commentref = shift;
-    }
     my @arg = @{$argref};
     my %value_member_flags = ('private' => &PRIVATE, 'public' => &PUBLIC);
     while (@arg) {    # We're up here for a TYPE name
@@ -861,20 +827,18 @@ sub parse_members {
                 error "data members not permitted in abstract valuetype";
                 return -1;
             }
-            if (exists $value_member_flags{$first_thing}) {
-                $value_member_flag = $value_member_flags{$first_thing};
-                $first_thing = shift @arg;
-            } else {
+            unless (exists $value_member_flags{$first_thing}) {
                 error "member in valuetype must be 'public' or 'private'";
                 return -1;
             }
+            $value_member_flag = $value_member_flags{$first_thing};
+            $first_thing = shift @arg;
         }
         my $component_type = parse_type($first_thing, \@arg, $symtreeref);
         if (! $component_type) {
             error "unknown type $first_thing";
             return -1;  # return value signals error.
         }
-        my $first_member = 1;
         while (@arg) {    # We're here for VARIABLE name(s)
             my $component_name = shift @arg;
             last if ($component_name eq '}');
@@ -897,19 +861,10 @@ sub parse_members {
                     return -1;
                 }
             }
-            my @node = ($component_type, $component_name, [ @dimensions ]);
-            if ($first_member) {
-                push @node, $commentref;
-                $first_member = 0;
-            } else {
-                push @node, 0;
-            }
-            my $node_ref;
+            my $node_ref = [ $component_type, $component_name,
+                             [ @dimensions ] ];
             if ($in_valuetype) {
-                my @member_tuple = ($value_member_flag, \@node);
-                $node_ref = \@member_tuple;
-            } else {
-                $node_ref = \@node;
+                $node_ref = [ $value_member_flag, $node_ref ];
             }
             push @{$structref}, $node_ref;
             last if ($nxtarg eq ';');
@@ -933,8 +888,17 @@ my $did_emucppmsg = 0;  # auxiliary to sub emucppmsg
 
 my @struct = ();       # temporary storage for struct/union/exception
 my @typestack = ();    # For struct/union/exception, typestack, namestack, and
-my @namestack = ();    # cmntstack move in parallel. For valuetypes, only
-my @cmntstack = ();    # @typestack is used.
+my @namestack = ();    # cmntstack move in parallel.
+                       # For valuetypes, only @typestack is used.
+my @cmntstack = ();
+    # The comment stack stores a trailing comment on the struct/union/exception
+    # declaration line, e.g.
+    #   struct mystruct {  // This comment is stored in @cmntstack.
+    #     ...
+    #   };
+    # It is needed because the node is not constructed until the end of the
+    # structure declaration, and members may have trailing comments which
+    # would overwrite the single post_comment buffer.
 
 sub set_verbose {
     if (@_) {
@@ -955,33 +919,243 @@ sub use_system_preprocessor {
     $emucpp = 0;
 }
 
-sub skip_input {
-    my $in;
-    my $line;
-    my $count = 0;
+sub eval_preproc_expr {
+    my @arg = @_;
+    my $symbol = shift @arg;
+    if ($symbol eq 'defined') {
+        shift @arg;   # discard open-paren
+        $symbol = shift @arg;
+        if ($#arg > 0) {  # there's more than the closing-paren
+            error "warning: #if not yet fully implemented\n";
+        }
+        return ($symbol =~ /^\d/);
+    } elsif ($symbol =~ /^[A-z]/) {
+        # NB: sub idlsplit has already done symbol substitution
+        error "built-in preprocessor does not know how to interpret $symbol";
+        return 0;
+    } elsif ($symbol !~ /^\d+$/) {
+        error "warning: #if expressions not yet implemented\n";
+    }
+    $symbol
+}
 
-    $in = $fh[$#infilename];
-    while (($line = getline($in))) {
-        # print "skipping $line  $count\n";
-        my @arg = idlsplit($line);
+sub skip_input {
+    my $count = 0;
+    my $in = $fh[$#infilename];
+    while (<$in>) {
+        next unless (/^\s*#/);
+        my @arg = idlsplit($_);
         my $kw = shift @arg;
         # print (join ('|', @arg) . "\n");
-        if ($kw eq '#') {
-            my $directive = shift @arg;
-            if ($count == 0 &&
-                ($directive eq 'else' || $directive eq 'endif')) {
+        my $directive = shift @arg;
+        if ($count == 0) {
+            if ($directive eq 'else' || $directive eq 'endif') {
                 return;
             }
-            if ($directive eq 'if' ||
-                $directive eq 'ifdef' ||
-                $directive eq 'ifndef') {
-                $count++;
-            } elsif ($directive eq 'endif') {
-                $count--;
+            if ($directive eq 'elif') {
+                if (eval_preproc_expr @arg) {
+                    return;
+                }
+                next;
             }
         }
+        if ($directive eq 'if' ||
+            $directive eq 'ifdef' ||
+            $directive eq 'ifndef') {
+            $count++;
+        } elsif ($directive eq 'endif') {
+            $count--;
+            if ($count <= 0) {
+                return;
+            }
+        }
+        # For #elif, the count remains the same.
     }
     error "skip_input: fell off end of file";
+}
+
+
+sub get_items {  # returns empty list for end-of-file or fatal error
+    my $in = shift;
+    my @items = ();
+    if (@global_items) {
+        @items = @global_items;
+        @global_items = ();
+        return @items;
+    }
+    my $first = 1;
+    my $in_comment = 0;
+    my $seen_token = 0;
+    my $line = "";
+    my $l;
+    @remark = ();
+    @post_comment = ();
+    while (($l = <$in>)) {
+        $line_number[$currfile]++;
+        chomp $l;
+        $l =~ s/\r//g;  # zap DOS line ending
+        if ($l =~ /^\s*$/) {           # empty
+            if ($in_comment) {
+                if ($seen_token) {
+                    push @post_comment, "";
+                } else {
+                    push @remark, "";
+                }
+            }
+            next;
+        }
+        if ($l =~ /^\s*\/\/(.*)/) {        # single-line comment
+            my $cmnt = $1;
+            if ($seen_token) {
+                push @post_comment, $cmnt;  # doesn't really happen (NYI)
+            } else {
+                push @remark, $cmnt;
+            }
+            next;
+        }
+        if ($in_comment) {
+            if ($l =~ /\/\*/) {
+                error "nested comments not supported!";
+            }
+            if ($l =~ /\*\//) {
+                my $cmnt = $l;
+                $cmnt =~ s/\s*\*\/.*$//;
+                if ($cmnt) {
+                    if ($seen_token) {
+                        push @post_comment, $cmnt;
+                    } else {
+                        push @remark, $cmnt;
+                    }
+                }
+                $in_comment = 0;     # end of multi-line comment
+                $l =~ s/^.*\*\///;
+                if ($seen_token) {
+                    if ($l !~ /^\s*$/) {
+                        error "unsupported comment/token combination";
+                    }
+                    last;
+                }
+                next if ($l =~ /^\s*$/);
+            } else {
+                if ($seen_token) {
+                    push @post_comment, $l;
+                } else {
+                    push @remark, $l;
+                }
+                next;
+            }
+        } elsif ($l =~ /\/\*/) {       # start of multi-line comment
+            my $cmntpos = pos $l;
+            my $cmnt = $l;
+            $cmnt =~ s/^.*\/\*//;  # remove comment start and stuff before
+            $cmnt =~ s/\*\/.*$//;  # remove comment end and stuff after (if any)
+            if ($l =~ /\*\//) {
+                # remove comment
+                $l =~ s/\/\*.*\*\///;
+            } else {
+                $in_comment = 1;
+                # remove start of comment
+                $l =~ s/\/\*.*$//;
+            }
+            if ($l =~ /^\s*$/) {       # If there is nothing else on the line
+                push @remark, $cmnt;   # then it's a general comment
+                next;
+            } else {
+                push @post_comment, $cmnt;  # else declare it a "post comment".
+            }
+        }
+        if ($l =~ /\/\/(.*)$/) {
+            my $cmnt = $1;
+            unless ($cmnt =~ /^\s*$/) {
+                push @post_comment, $cmnt;
+            }
+            $l =~ s/\/\/.*$//;         # discard trailing comment
+        }
+        $l =~ s/^\s+//;                # discard leading whitespace
+        $l =~ s/\s+$//;                # discard trailing whitespace
+        if ($first) {
+            $first = 0;
+        } else {
+            $l = " $l";
+        }
+        $line .= $l;
+        if (($line =~ /^#/)          # preprocessor directive
+         or ($line =~ /[;,":\{]$/)) { #" characters declared to denote eol.
+            $seen_token = 1;
+            last unless $in_comment;
+        }
+    }
+    if ($in_comment) {
+        error "end of file reached while comment still open";
+        $in_comment = 0;
+    }
+    if (! $line) {
+        return ();
+    }
+    # sub idlsplit also does preprocessor symbol substitution.
+    my @arg = idlsplit($line);
+    my @tmp = @arg;
+    if ($tmp[0] eq '#') {
+        shift @tmp;  # discard '#'
+        my $directive = shift @tmp;
+        if ($directive eq 'if' || $directive eq 'elif') {
+            emucppmsg;
+            skip_input unless (eval_preproc_expr @tmp);
+            @arg = get_items($in);
+        } elsif ($directive eq 'ifdef') {
+            my $symbol = shift @tmp;
+            emucppmsg;
+            skip_input unless ($symbol =~ /^\d/);
+            @arg = get_items($in);
+        } elsif ($directive eq 'ifndef') {
+            my $symbol = shift @tmp;
+            emucppmsg;
+            skip_input if ($symbol =~ /^\d/);
+            @arg = get_items($in);
+        } elsif ($directive eq 'define') {
+            my $symbol = shift @tmp;
+            my $value = 1;
+            emucppmsg;
+            if (@tmp) {
+                $value = join(' ', @tmp);
+                print("// defining $symbol as $value\n") if ($verbose);
+            }
+            if (exists $active_defines{$symbol} and
+                $value ne $active_defines{$symbol}) {
+                if ($cache_trees) {
+                    error("Redefinition of $symbol may lead to " .
+                          "erroneous trees when cache_trees is used");
+                } else {
+                    info "info: redefining $symbol";
+                }
+            }
+            $active_defines{$symbol} = $value;
+            @arg = get_items($in);
+        } elsif ($directive eq 'undef') {
+            my $symbol = shift @tmp;
+            emucppmsg;
+            if (exists $active_defines{$symbol}) {
+                if ($cache_trees) {
+                    error("#undef of $symbol may lead to " .
+                          "erroneous trees when cache_trees is used");
+                }
+                delete $active_defines{$symbol};
+            }
+            @arg = get_items($in);
+        } elsif ($directive eq 'else') {
+            # We only get to see the #else here if we were not skipping
+            # the preceding #if or #elif.
+            skip_input;
+            @arg = get_items($in);
+        } elsif ($directive eq 'endif') {
+            @arg = get_items($in);
+        }
+    }
+    @arg;
+}
+
+sub unget_items {
+    @global_items = @_;
 }
 
 
@@ -1004,10 +1178,11 @@ sub check_union_case {
         }
     } else {
         my $type = root_type($known_cases->[0]);
+        my $c;
         if (is_a($type, ENUM)) {
             # check if value is part of enumeration
             # (ignores scope for now...)
-            foreach my $c (@{$case->[2]}) {
+            foreach $c (@{$case->[2]}) {
                 my $e = (split "::", $c)[-1];
                 my $found = 0;
                 foreach (@{$type->[SUBORDINATES]}) {
@@ -1019,14 +1194,14 @@ sub check_union_case {
                 }
             }
         } elsif (is_a($type, BOOLEAN)) {
-            foreach my $c (@{$case->[2]}) {
+            foreach $c (@{$case->[2]}) {
                 unless ($c eq "TRUE" || $c eq "FALSE") {
                     error "invalid case value $c";
                     return 1;
                 }
             }
         } elsif (is_a($type, CHAR)) {
-            foreach my $c (@{$case->[2]}) {
+            foreach $c (@{$case->[2]}) {
                 unless ($c =~ /^'.*'$/ || $c =~ /^\d+$/) {
                     error "invalid case value $c";
                     return 1;
@@ -1034,7 +1209,7 @@ sub check_union_case {
             }
         } else {
             # must be integer
-            foreach my $c (@{$case->[2]}) {
+            foreach $c (@{$case->[2]}) {
                 unless ($c =~ /^[-+]?\d+$/) {
                     error "invalid case value $c";
                     return 1;
@@ -1045,7 +1220,7 @@ sub check_union_case {
             next if $i++ == 0;
             next unless $_->[0] == CASE;
             foreach (@{$_->[2]}) {
-                foreach my $c (@{$case->[2]}) {
+                foreach $c (@{$case->[2]}) {
                     if ($c eq $_) {
                         error "duplicate case label $c";
                         return 1;
@@ -1057,16 +1232,19 @@ sub check_union_case {
     return 0;
 }
 
+
 sub Parse_File {
     @infilename = ();    # infilename and line_number move in parallel.
     @line_number = ();
     $n_errors = 0;       # auxiliary to sub error
-    @comment = ();       # Auxiliary to comment processing
-    $in_comment = 0;     # Auxiliary to multi-line comment processing
+    @remark = ();        # Auxiliary to comment processing
+    @post_comment = ();  # Auxiliary to comment processing
     $in_valuetype = 0;   # Auxiliary to valuetype processing
     $abstract = 0;
     $currfile = -1;
-    %includetree = ();   # Roots of previously parsed includefiles
+    unless ($cache_trees) {
+        %includetree = ();   # Roots of previously parsed includefiles
+    }
     $did_emucppmsg = 0;  # auxiliary to sub emucppmsg
     @scopestack = ();
     @prev_symroots = ();
@@ -1126,7 +1304,6 @@ sub Parse_File_i {
         $in = $input_filehandle;  # Process a module or interface within file.
     }
 
-    my $line;
     # symbol tree that will be constructed here
     my $symbols;
     if ($symb) {
@@ -1137,66 +1314,31 @@ sub Parse_File_i {
     # @struct, @typestack, @namestack, @cmntstack use to be my() vars here.
     # They were moved to the global scope in order to support #include
     # statements at arbitrary locations.
-    while (($line = getline($in))) {
-#        print "$line\n";
-        my $cmnt = 0;
-        if (@comment) {
-            $cmnt = [ @comment ];
+    my @arg;
+    while ((@arg = get_items($in))) {
+        if ($verbose > 1) {
+            my $line = join(' ', @arg);
+            print "IDLtree: parsing $line\n";   # "super verbose mode"
         }
-        my @arg = idlsplit($line);
+        if ($enable_comments && @remark) {
+            my $remnode_ref = [ REMARK, [ @remark ], 0, 0, curr_scope ];
+            if (@typestack) {
+                if ($in_valuetype) {
+                    push @struct, [ 0, $remnode_ref ];
+                } else {
+                    push @struct, $remnode_ref;
+                }
+            } else {
+                push @$symbols, $remnode_ref;
+            }
+            @remark = ();
+        }
+        my $cmnt = comment;
         KEYWORD:
         my $kw = shift @arg;
-# print (join ('|', @arg) . "\n");
         if ($kw eq '#') {
             my $directive = shift @arg;
-            if ($directive eq 'if') {
-                my $symbol = shift @arg;
-                emucppmsg;
-                if ("$symbol" eq '0') {
-                    skip_input;
-                } elsif ($symbol eq 'defined') {
-                    shift @arg;   # discard open-paren
-                    $symbol = shift @arg;
-                    if ($#arg) {  # there's more than the closing-paren
-                        warn "warning: #if not yet fully implemented\n";
-                    } else {
-                        skip_input unless (exists $active_defines{$symbol});
-                    }
-                } elsif ($symbol =~ /^[A-z]/) {
-                    if (not exists $active_defines{$symbol}
-                        or ! $active_defines{$symbol}) {
-                        skip_input;
-                    }
-                } elsif ($symbol !~ /^\d+$/) {
-                    warn "warning: #if expressions not yet implemented\n";
-                }
-            } elsif ($directive eq 'ifdef') {
-                my $symbol = shift @arg;
-                emucppmsg;
-                skip_input unless (exists $active_defines{$symbol});
-            } elsif ($directive eq 'ifndef') {
-                my $symbol = shift @arg;
-                emucppmsg;
-                skip_input if (exists $active_defines{$symbol});
-            } elsif ($directive eq 'define') {
-                my $symbol = shift @arg;
-                my $value = 1;
-                emucppmsg;
-                if (@arg) {
-                    $value = join(' ', @arg);
-                    print("// defining $symbol as $value\n") if ($verbose);
-                }
-                if (exists $active_defines{$symbol}) {
-                    warn "info: redefining $symbol\n";
-                }
-                $active_defines{$symbol} = $value;
-            } elsif ($directive eq 'undef') {
-                my $symbol = shift @arg;
-                emucppmsg;
-                if (exists $active_defines{$symbol}) {
-                    delete $active_defines{$symbol};
-                }
-            } elsif ($directive eq 'pragma') {
+            if ($directive eq 'pragma') {
                 my @pragma_node;
                 $directive = shift @arg;
                 if ($directive eq 'prefix') {
@@ -1318,10 +1460,20 @@ sub Parse_File_i {
                 my @include_node = (INCFILE, $filename,
                                     $incfile_contents_ref, $cmnt, curr_scope);
                 push @$symbols, \@include_node;
-            } elsif ($directive eq 'else') {
-                skip_input;
-            } elsif ($directive ne 'endif') {
-                warn "ignoring preprocessor directive \#$directive\n";
+            } elsif ($directive eq 'if' ||
+                     $directive eq 'ifdef' ||
+                     $directive eq 'ifndef' ||
+                     $directive eq 'elif' ||
+                     $directive eq 'else' ||
+                     $directive eq 'endif' ||
+                     $directive eq 'define' ||
+                     $directive eq 'undef') {
+                # Sanity check only -
+                # preprocessor conditions and definitions were already handled
+                # in sub get_items and do not appear here.
+                error "internal error - seen #$directive in Parse_File_i\n";
+            } else {
+                info "ignoring preprocessor directive \#$directive\n";
             }
             next;
 
@@ -1345,7 +1497,7 @@ sub Parse_File_i {
                 my @symarray = @$symbols;
                 my $vnoderef = $symarray[$#symarray];
                 my @obvsub = ($abstract, [ @vt_inheritance ], [ @struct ]);
-                ${$vnoderef}[SUBORDINATES] = \@obvsub;
+                ${$vnoderef}[SUBORDINATES] = [ @obvsub ];
                 $abstract = 0;
                 $in_valuetype = 0;
                 @vt_inheritance = (0, 0);
@@ -1394,7 +1546,10 @@ sub Parse_File_i {
             if (@scope) {
                 $fullname = join('::', @scope) . "::$name";
             }
-            my $module = find_node_i($fullname, $symbols, 1);
+            my $module = 0;
+            if ($support_module_reopening) {
+                $module = find_node_i($fullname, $symbols, 1);
+            }
             if ($module) {
                 my @mnode = @$module;
                 if ($mnode[TYPE] != MODULE) {
@@ -1668,13 +1823,40 @@ sub Parse_File_i {
                     last unless ($arg[0] eq 'case');
                     shift @arg;
                 }
-                @node = (CASE, "", \@casevals, $cmnt);
+                if (! @arg) {
+                    # Peek ahead at following lines.  If they contain further
+                    # CASEs then append them to @casevals.
+                    while ((@arg = get_items($in))) {
+                        $kw = shift @arg;
+                        unless ($kw eq 'case') {
+                            unshift @arg, $kw;
+                            unget_items(@arg);
+                            @arg = ();
+                            last;
+                        }
+                        if ($arg[$#arg] eq ';') {
+                            pop @arg;
+                        }
+                        while (@arg) {
+                            push @casevals, shift @arg;
+                            if (shift @arg ne ':') {
+                                error "expecting ':'";
+                                last;
+                            }
+                            last unless (@arg);
+                            last unless ($arg[0] eq 'case');
+                            shift @arg;
+                        }
+                        last if (@arg);
+                    }
+                }
+                @node = (CASE, "", \@casevals);
             } else {
                 if (shift @arg ne ':') {
                     error "expecting ':'";
                     next;
                 }
-                @node = (DEFAULT, "", 0, $cmnt);
+                @node = (DEFAULT, "", 0);
             }
             check_union_case(\@struct, \@node);
             push @struct, \@node;
@@ -1687,7 +1869,14 @@ sub Parse_File_i {
                     }
                     my $type = pop @typestack;
                     my $name = pop @namestack;
-                    my $cmnt = pop @cmntstack;
+                    my $initial_cmnt = pop @cmntstack;
+                    if ($initial_cmnt) {
+                        if ($cmnt) {
+                            unshift @$cmnt, @$initial_cmnt;
+                        } else {
+                            $cmnt = $initial_cmnt;
+                        }
+                    }
                     if ($type != UNION) {
                         error "internal error 2";
                         next;
@@ -1722,6 +1911,26 @@ sub Parse_File_i {
             unless ($typething) {
                 error "unknown const type $type";
                 next;
+            }
+            # Check basic validity of the RHS expression.
+            foreach (@arg) {
+                next if (/^\d/ or /^\.\d/ or /^-\d/);   # numeric constant
+                next if (/^'.*'$/ or /^".*"$/);         # character or string
+                next if is_valid_identifier $_;         # identifier
+                # Check against predefined operands.
+                my $arg = $_;
+                my @operands = ( '+', '-', '*', '/', '%', '<<', '>>', '~',
+                                 '^', '|', '&', '!', '||', '&&', '==', '!=',
+                                 '<', '>', '<=', '>=' );
+                my $is_operand = 0;
+                foreach (@operands) {
+                    if ($arg eq $_) {
+                        $is_operand = 1;
+                        last;
+                    }
+                }
+                next if $is_operand;
+                error "unknown token in CONST: $arg";
             }
             my @tuple = ($typething, [ @arg ]);
             if (isnode $typething) {
@@ -1764,19 +1973,24 @@ sub Parse_File_i {
             if (shift @arg ne '{') {
                 error("expecting '{'");
                 next;
-            } elsif (pop @arg ne '}') {
-                error("expecting '}'");
-                next;
             }
             my @values = ();
             my $repres_given = grep(/=/, @arg);
             if ($repres_given) {
-                warn ("warning - $typename: enum representations " .
+                info ("warning - $typename: enum representations " .
                               " are a non-standard extension\n");
             }
             my $natural_rep = 0;
             while (@arg) {
-                push @values, shift @arg;
+                my $lit = shift @arg;
+                check_name $lit;
+                if ($enable_enum_comments && @post_comment) {
+                    my $tuple = [ $lit, [ @post_comment ] ];
+                    push @values, $tuple;
+                    @post_comment = ();
+                } else {
+                    push @values, $lit;
+                }
                 if (@arg) {
                     my $nxt = shift @arg;
                     if ($nxt eq '=') {
@@ -1789,7 +2003,12 @@ sub Parse_File_i {
                         $values[$#values] .= '=' . $natural_rep;
                         $natural_rep++;
                     }
-                    if ($nxt ne ',') {
+                    last if ($nxt eq '}');
+                    if ($nxt eq ',') {
+                        unless (@arg) {
+                            @arg = get_items($in);
+                        }
+                    } else {
                         error "expecting ','";
                         last;
                     }
@@ -1823,8 +2042,7 @@ sub Parse_File_i {
                 push @$symbols, \@node;
             }
 
-        } elsif ($line =~ /\(.*\)\s*;$/) {
-            # Method
+        } elsif (grep /\(/, @arg) {   # Method declaration
             my $rettype;
             my @subord;
             if ($kw eq 'oneway') {
@@ -1921,7 +2139,7 @@ sub Parse_File_i {
                 next;
             }
             unshift @arg, $kw;   # put type back into @arg
-            if (parse_members($symbols, \@arg, \@struct, $cmnt) == 1) {
+            if (parse_members($symbols, \@arg, \@struct) == 1) {
                 # end of type declaration was encountered
                 my $type = pop @typestack;
                 if ($type == VALUETYPE) {
@@ -1930,20 +2148,30 @@ sub Parse_File_i {
                     # in order to support recursive value type definitions.
                     my @symarray = @$symbols;
                     my $vnoderef = $symarray[$#symarray];
-                    my @obvsub = ($abstract, [ @vt_inheritance ], [ @struct ]);
-                    ${$vnoderef}[SUBORDINATES] = \@obvsub;
+                    my $obvsub = [ $abstract, [ @vt_inheritance ], [ @struct ] ];
+                    ${$vnoderef}[SUBORDINATES] = $obvsub;
                     $abstract = 0;
                     $in_valuetype = 0;
                     @vt_inheritance = (0, 0);
                 } else {
                     my $name = pop @namestack;
-                    $cmnt = pop @cmntstack;
+                    my $initial_cmnt = pop @cmntstack;
+                    if ($initial_cmnt) {
+                        if ($cmnt) {
+                            unshift @$cmnt, @$initial_cmnt;
+                        } else {
+                            $cmnt = $initial_cmnt;
+                        }
+                    }
                     my @node = ($type, $name, [ @struct ], $cmnt, curr_scope);
                     push @$symbols, [ @node ];
                 }
                 @struct = ();
             }
         }
+    }
+    if ($verbose) {
+        print "IDLtree: done with parsing $file\n";
     }
     if ($file) {
         close $in;
@@ -1965,10 +2193,10 @@ sub require_end_of_stmt {
         pop @{$argref};
         return 1;
     }
-    my $line;
+    my @new_items;
     while ($$argref[$#$argref] ne ';') {
-        last if (! ($line = getline($file)));
-        push @{$argref}, idlsplit($line);
+        last if (! (@new_items = get_items($file)));
+        push @{$argref}, @new_items;
     }
     if ($$argref[$#$argref] eq ';') {
         pop @{$argref};
@@ -1986,7 +2214,7 @@ sub isnode {
         && $$node_ref[TYPE] >= BOOLEAN
         && $$node_ref[TYPE] < NUMBER_OF_TYPES;
 
-    # NB: The (@$node_ref == 5) means that component descriptors of 
+    # NB: The (@$node_ref == 5) means that component descriptors of
     # structs/unions/exceptions and parameter descriptors of methods
     # do not qualify as nodes.
 }
@@ -1997,9 +2225,9 @@ sub is_scope {
     my $rv = 0;
     if (isnode $thing) {
         my $type = $$thing[TYPE];
-        $rv = ($type == MODULE || $type == INTERFACE);
+        $rv = ($type == MODULE || $type == INTERFACE || $type == INCFILE);
     }
-    $rv;
+    return $rv;
 }
 
 
@@ -2012,8 +2240,8 @@ sub find_node_i_recursive {   # auxiliary to find_node_i()
                 return $root;
             }
             my @decls;
-            if (is_scope $root) {
-                @decls = @{$$root[SUBORDINATES]};
+            if (is_scope($root)) {
+                @decls = @{$root->[SUBORDINATES]};
                 if ($$root[TYPE] == INTERFACE) {
                     shift @decls;    # discard ancestors
                     shift @decls;    # discard abstract flag
@@ -2022,6 +2250,10 @@ sub find_node_i_recursive {   # auxiliary to find_node_i()
                 @decls = @{$root};
             }
             foreach (@decls) {
+                if (not isnode $_) {
+                    error "find_node_i_recursive: internal error 1\n";
+                    last;
+                }
                 my @n = @{$_};
                 if ($n[NAME] eq $name) {
                     return $_;
@@ -2034,7 +2266,7 @@ sub find_node_i_recursive {   # auxiliary to find_node_i()
                 }
             }
             last unless (is_scope $root);
-            $root = $$root[SCOPEREF];
+            $root = $root->[SCOPEREF];
         }
         return 0;
     }
@@ -2094,36 +2326,71 @@ sub find_node_i {
     # if the name given is a CORBA predefined type name.
     # Returns 0 if the name could not be identified.
     my $name = shift;
+    if ("$name" eq "") {
+        warn "IDLtree::find_node_i() called on empty name\n";
+        return 0;
+    }
     my $current_symtree_ref = shift;
     my $seek_module = 0;
     if (@_) {
         $seek_module = shift;
     }
-    my $predef_type_id = predef_type($name);
-    if ($predef_type_id) {
-        return $predef_type_id;
+    if ($name =~ /CORBA::/) {
+        $name =~ s/CORBA:://;
     }
     my @namecomponents = split(/::/, $name);
     my $nseps = scalar(@namecomponents) - 1;
-    if ($nseps and not $seek_module) {
-        # Discard same-scope prefix.
-        my $given_prefix = $name;
-        $given_prefix =~ s/::\w+$//;
-        my @scopes = scope_names;
-        if (scalar(@scopes) >= $nseps) {
-            my $current_prefix = join("::", splice(@scopes, -$nseps));
-            if ($given_prefix eq $current_prefix) {
-                $name =~ s/^.*:://;
+    if ($nseps) {
+        unless ($seek_module) {
+            # Discard same-scope prefix.
+            my $given_prefix = $name;
+            $given_prefix =~ s/::\w+$//;
+            my @scopes = scope_names;
+            if (scalar(@scopes) >= $nseps) {
+                my $current_prefix = join("::", splice(@scopes, -$nseps));
+                if ($given_prefix eq $current_prefix) {
+                    $name =~ s/^.*:://;
+                    @namecomponents = split(/::/, $name);
+                    $nseps = scalar(@namecomponents) - 1;
+                }
             }
         }
+    } else {
+        my $predef_type_id = predef_type($name);
+        if ($predef_type_id) {
+            return $predef_type_id;
+        }
+    }
+    # References to names in foreign scopes are hashed because searching
+    # for them may be expensive with large and complex IDL files.
+    # Unqualified names are not hashed in order to be able to distinguish
+    # same names in different scopes - such as
+    #   module m1 {
+    #     typedef boolean t;
+    #   };
+    #   module m2 {
+    #     typedef float t;
+    #     ....
+    #   };
+    # Here, if the cache is not cleared after parsing m1, then `t' refers to
+    # m1::t even when parsing m2.
+    # We keep away from that problem by not caching references to local names.
+    if ($nseps and exists $findnode_cache{$name}) {
+        return $findnode_cache{$name};
     }
     my $noderef = find_node_i_recursive($name, $current_symtree_ref);
     if ($noderef) {
+        if ($nseps) {
+            $findnode_cache{$name} = $noderef;
+        }
         return $noderef;
     }
     foreach $noderef (@prev_symroots) {
         my $result_node_ref = find_node_i_recursive($name, $noderef);
         if ($result_node_ref) {
+            if ($nseps) {
+                $findnode_cache{$name} = $result_node_ref;
+            }
             return $result_node_ref;
         }
     }
@@ -2282,29 +2549,8 @@ sub root_elem_type {
 }
 
 
-{
-my @used_files;
-
-sub get_files_included {     # Auxiliary to sub files_included
-    my $symroot = shift;
-    ref $symroot or return;
-    foreach (@$symroot) {
-        my @node = @$_;
-        if ($node[TYPE] == INCFILE) {
-            my $name = $node[NAME];
-            unless (grep { $_ eq $name } @used_files) {
-                push @used_files, $name;
-                get_files_included $node[SUBORDINATES];
-            }
-        }
-    }
-}
-
 sub files_included {
-    @used_files = ();
-    get_files_included shift;
-    @used_files
-}
+    keys %includetree
 }
 
 
@@ -2370,13 +2616,14 @@ sub find_in_current_scope {  # Auxiliary to find_scope() / find_node().
     my $decls = $scoperef->[SUBORDINATES];
     my $start = 0;
     my $end = $#$decls;
-    if ($scoperef->[TYPE] == CORBA::IDLtree::INTERFACE) {
+    if ($scoperef->[TYPE] == INTERFACE) {
         $start = 2;
     }
-    for (my $i=$start; $i<=$end; $i++) {
+    my $i;
+    for ($i = $start; $i <= $end; $i++) {
         my $node = $decls->[$i];
         if (@$node > 1 && $node->[NAME] eq $name) {
-            if ($must_be_scope_node and not CORBA::IDLtree::is_scope $node) {
+            if ($must_be_scope_node and not is_scope $node) {
                 warn("warning: $name also used in " .
                      scoped_name($node) . "\n");
             } else {
@@ -2403,12 +2650,12 @@ sub find_scope_i {
         foreach (@$global_symroot) {
             if ($$_[TYPE] == INCFILE) {
                 foreach (@{$$_[SUBORDINATES]}) {
-                    if (is_scope($_) || $_->[TYPE] == INCFILE) {
+                    if (is_scope $_) {
                         $currscope = find_scope_i(\@scopes, $_);
                         last GLOBAL_SCOPES if $currscope;
                     }
                 }
-            } elsif (CORBA::IDLtree::is_scope($_) && $scopes[0] eq $$_[NAME]) {
+            } elsif (is_scope($_) && $scopes[0] eq $$_[NAME]) {
                 # It's in this scope.
                 $currscope = $_;
                 last;
@@ -2589,7 +2836,7 @@ sub dump_symbols_internal {
     my $type = $node[TYPE];
     my $name = $node[NAME];
     my $subord = $node[SUBORDINATES];
-    dump_comment $node[COMMENT];
+    dump_comment $node[REMARK];
     my @arg = @{$subord};
     my $i;
     if ($type == INCFILE || $type == PRAGMA_PREFIX) {

@@ -93,6 +93,18 @@ Contents of SUBORDINATES:
                   For DEFAULT, both the NAME and the SUBORDINATE are unused.
 
   ENUM            Reference to the array of enum value literals.
+                  If the global variable $enable_enum_comments is set then
+                  the elements in the array may be shaped differently:
+                  - If the enum literal is not followed by a comment then
+                    the element in the array is the enum literal as usual.
+                  - If the enum literal is followed by a comment then the
+                    element in the array is a reference to a tuple. In this
+                    tuple, the first element is the enum literal, and the
+                    second element is a reference to the comment list.
+                    Thus, when generating code for the literals, it is
+                    recommended to use the `ref' predicate to find out
+                    which of the two alternatives is in effect for each
+                    array element.
 
   TYPEDEF         Reference to a two-element array: element 0 contains a
                   reference to the type descriptor of the original type;
@@ -135,6 +147,13 @@ Contents of SUBORDINATES:
                                 method node subordinates (i.e., the return
                                 type) may be FACTORY.
                          [1] => reference to the defining node.
+                                In case of PRIVATE or PUBLIC state member,
+                                the defining node is the same as for STRUCT
+                                subordinates, namely a quadruplet containing:
+                                 [0] => member type id
+                                 [1] => member name
+                                 [2] => dimref (reference to dimensions list)
+                                 [3] => COMMENT element
 
   VALUETYPE_BOX   Reference to the defining type node.
 
@@ -150,9 +169,9 @@ Contents of SUBORDINATES:
                   descriptor for the return type. Elements 1 and following
                   are references to parameter descriptor nodes with the
                   following structure:
-                      [0] => parameter type descriptor
-                      [1] => parameter name
-                      [2] => parameter mode (IN, OUT, or INOUT)
+                      elem. 0 => parameter type descriptor
+                      elem. 1 => parameter name
+                      elem. 2 => parameter mode (IN, OUT, or INOUT)
                   The last element in the variable-length array is a
                   reference to the "raises" list. This list contains
                   references to the declaration nodes of exceptions raised,
@@ -174,14 +193,19 @@ Contents of SUBORDINATES:
                   holds a reference to all further text appearing after
                   the pragma name, if any.
 
+  REMARK          The SUBORDINATES of the node is unused.
+                  The NAME component contains a reference to a list of
+                  comment lines. In the case of a single-line comment, the
+                  list will contain only one element; in case of multi-
+                  line comments, each line is represented by a list entry.
+                  The lines in this list are not newline terminated; empty
+                  entries represent empty comment lines.
 
-The COMMENT element holds the comment text that precedes an IDL item
-or appears on the same line as the IDL item.
-Note that comments that relate to an IDL item, but appear on lines
-*after* the IDL item, are not handled correctly: They are associated with
-the following IDL item. Comment text appearing after the last IDL item
-is lost.
-The comment text is stored as a list to accomodate multi-line comments.
+
+The COMMENT element holds the comment text that follows the IDL declaration
+on the same line. Usually this is just a single line. However, if a multi-
+line comment is started on the same line after a declaration, the multi-line
+comment may extend to further lines - therefore we use a list of lines.
 The lines in this list are not newline terminated. The COMMENT field is a
 reference to this list, or contains the value 0 if no comment is present
 at the IDL item.
@@ -194,6 +218,6 @@ INCFILE node (the INCFILE reference was introduced in IDLtree version
 1.3.)  All nodes have this element except for the parameter nodes of
 methods and the component nodes of structs/unions/exceptions.
 
--- Last updated: 2002/12/01
+-- Last updated: 2003/07/25
 -- okellogg@users.sourceforge.net
 
