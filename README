@@ -1,0 +1,17 @@
+Installation of IDLtree:
+
+Let $LIBTOP be the directory root to where the perl library was installed 
+on your system (usually, this is /usr/lib/perl5 or /usr/local/lib/perl5.)
+
+1. Create the directory $LIBTOP/CORBA if it doesn't exist yet.
+
+2. Copy the ./CORBA/IDLtree.pm file into $LIBTOP/CORBA
+
+Usage of the demo application:
+
+Assuming you are in the ./demoapp directory and have a myfile.idl there,
+
+   perl idl2ada.pl myfile.idl
+
+will make the IDL to Ada translator generate various Ada files.
+
