@@ -6,6 +6,7 @@
 # -----------------------------------------------------------------------------
 # Ver. |   Date   | History
 # -----+----------+------------------------------------------------------------
+#  1.1a 2002/06/27  Added sub is_valid_identifier. Added a test directory.
 #  1.1  2002/06/24  Removed non-standard extensions.
 #                   In the interest of IDL conformance, changed the scope
 #                   separator used internally to "::". (This separator
@@ -93,12 +94,13 @@
 
 
 package CORBA::IDLtree;
-require 5.002;
+use 5.005_64;
+use strict vars;
 require Exporter;
 # use Config;
-@ISA = (Exporter);
-@EXPORT = ();
-@EXPORT_OK = ();  # &Parse_File, &Dump_Symbols, and all the constants subs
+our @ISA = ('Exporter');
+our @EXPORT = ();
+our @EXPORT_OK = ();  # &Parse_File, &Dump_Symbols, and all the constants subs
 
 
 # -----------------------------------------------------------------------------
@@ -256,8 +258,8 @@ sub Parse_File;
     # In case of errors during parsing , Parse_File returns 0.
 
 # User definable auxiliary data for Parse_File:
-@include_path = ();     # Paths where to look for included IDL files
-%defines = ();          # Symbol definitions for preprocessor
+our @include_path = ();     # Paths where to look for included IDL files
+our %defines = ();          # Symbol definitions for preprocessor
 
 sub Dump_Symbols;
     # Symbol tree dumper (for debugging etc.)
@@ -330,15 +332,15 @@ sub PRAGMA_ID ()       { 46 }  # node
 sub NUMBER_OF_TYPES () { 47 }
 # The @predef_types array must have the types in the same order as
 # the numeric order of type identifying constants defined above.
-@predef_types = qw/ none boolean octet char wchar short long long_long 
-                    unsigned_short unsigned_long unsigned_long_long
-                    float double long_double string wstring Object 
-                    TypeCode any fixed bounded_string bounded_wstring
-                    sequence enum typedef native struct union case default
-                    exception const module interface interface_fwd 
-                    valuetype valuetype_fwd valuetype_box
-                    attribute oneway void factory method 
-                    include pragma_prefix pragma_version pragma_id /;
+our @predef_types = qw/ none boolean octet char wchar short long long_long 
+                        unsigned_short unsigned_long unsigned_long_long
+                        float double long_double string wstring Object 
+                        TypeCode any fixed bounded_string bounded_wstring
+                        sequence enum typedef native struct union case default
+                        exception const module interface interface_fwd 
+                        valuetype valuetype_fwd valuetype_box
+                        attribute oneway void factory method 
+                        include pragma_prefix pragma_version pragma_id /;
 
 # Valuetype flag values
 sub ABSTRACT      { 1 }
@@ -374,6 +376,7 @@ sub set_verbose;
 # Internal subroutines (should not be visible)
 
 sub getline;
+sub is_valid_identifier;
 sub check_name;
 sub curr_scope;
 sub parse_sequence;
@@ -392,8 +395,10 @@ my @line_number = ();
 my $n_errors = 0;       # auxiliary to sub error
 my $in_comment = 0;     # Auxiliary to &getline (multi-line comment processing)
 my $in_valuetype = 0;   # Auxiliary to valuetype processing
+my $abstract = 0;
 my $currfile = -1;
 my $emucpp = 1;         # use C preprocessor emulation
+my $verbose = 0;        # report progress to stdout
 
 sub locate_executable {
     # FIXME: this is probably another reinvention of the wheel.
@@ -402,7 +407,9 @@ sub locate_executable {
     # my $pathsep = $Config{'path_sep'};
     my $pathsep = ':';
     my $fully_qualified_name = "";
-    foreach $dir (split(/$pathsep/, $ENV{'PATH'})) {
+    my @dirs = split(/$pathsep/, $ENV{'PATH'});
+    my $dir;  # "use strict" wants it.
+    foreach $dir (@dirs) {
         my $fqn = "$dir/$executable";
         if (-e $fqn) {
             $fully_qualified_name = $fqn;
@@ -416,6 +423,7 @@ sub getline {  # returns empty string for end-of-file or fatal error
     my $in = shift;
     my $line = "";
     my $first = 1;
+    my $l;
     while (($l = <$in>)) {
         $line_number[$currfile]++;
         next if ($l =~ /^\s*$/);       # empty
@@ -670,19 +678,24 @@ sub typeof {      # Returns the string of a "type descriptor" in IDL syntax
 }
 
 
+sub is_valid_identifier {
+    my $name = shift;
+    if ($name !~ /^[a-z:]/i) {
+        return 0;  # illegal first character
+    }
+    $name !~ /[^a-z0-9_:\.]/i
+}
+
 sub check_name {
     my $name = shift;
     my $msg = "name";
     if (@_) {
         $msg = shift;
     }
-    unless (defined $name) {
-        error "missing name";
-    } elsif ($name !~ /^[a-z:]/i) {
-        error "illegal first character of $msg";
-    } elsif ($name =~ /[^a-z0-9_:\.]/i and not
-             $name =~ /^string<.*>$/) {
-        error "illegal $msg";
+    unless (is_valid_identifier $name) {
+        unless ($name =~ /^string<.*>$/) {
+            error "illegal $msg";
+        }
     }
     $name;
 }
@@ -876,7 +889,6 @@ my @fh = qw/ IN0 IN1 IN2 IN3 IN4 IN5 IN6 IN7 IN8 IN9/;
     # Input file handles (constants)
 
 my %includetree = ();   # Roots of previously parsed includefiles
-my $verbose = 0;        # report progress to stdout
 my $did_emucppmsg = 0;  # auxiliary to sub emucppmsg
 
 sub set_verbose {
@@ -936,13 +948,13 @@ sub isname {
 sub Parse_File {
     my $file = shift;
     my $input_filehandle = "";
-    my $abstract = 0;
-    my @vt_inheritance = (0, 0);
-    my $custom = 0;
     if (@_) {
         $input_filehandle = shift;   # internal use only
     }
+    my @vt_inheritance = (0, 0);
     my $in;
+    my $custom = 0;
+    $abstract = 0;
     if ($file) {        # Process a new file (or includefile if cpp emulated)
         push @infilename, $file;
         $currfile = $#infilename;
@@ -950,9 +962,9 @@ sub Parse_File {
         my $found = 1;
         if (not -e "$file") {
             $found = 0;
-            foreach $i (@include_path) {
-                if (-e "$i/$file") {
-                    $file = "$i/$file";
+            foreach (@include_path) {
+                if (-e "$_/$file") {
+                    $file = "$_/$file";
                     $found = 1;
                     last;
                 }
@@ -976,11 +988,11 @@ sub Parse_File {
             open($in, $file) or die "Cannot open file $file\n";
         } else {
             my $cpp_args = "";
-            foreach $define (keys %defines) {
-                $cpp_args .= " -D${define}=" . $defines{$define};
+            foreach (keys %defines) {
+                $cpp_args .= " -D$_=" . $defines{$_};
             }
-            foreach $include (@include_path) {
-                $cpp_args .= " -I${include}";
+            foreach (@include_path) {
+                $cpp_args .= " -I$_";
             }
             open($in, "$cppcmd $cpp_args $file |")
                  or die "Cannot open file $file\n";
@@ -1099,7 +1111,7 @@ sub Parse_File {
                     $incfile_contents_ref = $includetree{$filename};
                 } else {
                     unshift @prev_symroots, \@symbols;
-                    $incfile_contents_ref = Parse_File($filename, $cpp_args);
+                    $incfile_contents_ref = Parse_File($filename);
                     $incfile_contents_ref or die "can't go on, sorry\n";
                     shift @prev_symroots;
                     $includetree{$filename} = $incfile_contents_ref;
@@ -1218,6 +1230,7 @@ sub Parse_File {
                     error "expecting ancestor(s)";
                     next;
                 }
+                my $i;  # "use strict" wants it.
                 for ($i = 0; $i < @arg; $i++) {
                     my $name = check_name($arg[$i], "ancestor name");
                     my $ancestor_node = find_node($name, \@symbols);
@@ -1759,10 +1772,10 @@ sub find_node_recursive {   # auxiliary to find_node()
             } else {
                 @decls = @{$root};
             }
-            foreach $decl (@decls) {
-                my @n = @{$decl};
+            foreach (@decls) {
+                my @n = @{$_};
                 if ($n[NAME] eq $name) {
-                    return $decl;
+                    return $_;
                 }
                 if ($n[TYPE] == INCFILE) {
                     my $result = find_node_recursive($name, $n[SUBORDINATES]);
@@ -1792,11 +1805,11 @@ sub find_node_recursive {   # auxiliary to find_node()
         } else {
             @decls = @{$root};
         }
-        foreach $decl (@decls) {
+        foreach (@decls) {
             my $result = 0;
-            my @n = @{$decl};
-            if (is_scope $decl and $n[NAME] eq $this_prefix) {
-                $result = find_node_recursive($name, $decl);
+            my @n = @{$_};
+            if (is_scope $_ and $n[NAME] eq $this_prefix) {
+                $result = find_node_recursive($name, $_);
             } elsif ($n[TYPE] == INCFILE) {
                 $result = find_node_recursive($this_prefix, $n[SUBORDINATES]);
                 if ($result) {
@@ -1817,6 +1830,7 @@ sub find_node_recursive {   # auxiliary to find_node()
 # Return the names of the nodes in @scopestack as a list.
 sub scope_names {
     my @names = ();
+    my $noderef;  # "use strict" wants it.
     foreach $noderef (@scopestack) {
         push @names, $$noderef[NAME];
     }
@@ -1847,12 +1861,12 @@ sub find_node {
             }
         }
     }
-    my $result_node_ref = find_node_recursive($name, $current_symtree_ref);
-    if ($result_node_ref) {
-        return $result_node_ref;
+    my $noderef = find_node_recursive($name, $current_symtree_ref);
+    if ($noderef) {
+        return $noderef;
     }
     foreach $noderef (@prev_symroots) {
-        $result_node_ref = find_node_recursive($name, $noderef);
+        my $result_node_ref = find_node_recursive($name, $noderef);
         if ($result_node_ref) {
             return $result_node_ref;
         }
@@ -1897,13 +1911,16 @@ sub dump_symbols_internal {
     my $sym_array_ref = shift;
     if (! $sym_array_ref) {
         warn "dump_symbols_internal: empty elem (returning)\n";
-        return;
+        return 0;
     }
+    my $status = 1;
     if (not isnode $sym_array_ref) {
-        foreach $elem (@{$sym_array_ref}) {
-            dump_symbols_internal $elem;
+        foreach (@{$sym_array_ref}) {
+            unless (dump_symbols_internal $_) {
+                $status = 0;
+            }
         }
-        return;
+        return $status;
     }
     my @node = @{$sym_array_ref};
     my $type = $node[TYPE];
@@ -1919,12 +1936,12 @@ sub dump_symbols_internal {
             dsemit "\#pragma prefix ";
         }
         dsemit "\"$name\"\n\n";
-        return;
-    } elsif ($type == ATTRIBUTE) {
+        return $status;
+    }
+    if ($type == ATTRIBUTE) {
         dsdent;
         dsemit("readonly ") if ($arg[0]);
-        dsemit("attribute " . dstypeof($arg[1]) . " $name;\n\n");
-        return;
+        dsemit("attribute " . dstypeof($arg[1]) . " $name");
     } elsif ($type == METHOD) {
         my $t = shift @arg;
         my $rettype;
@@ -1969,8 +1986,6 @@ sub dump_symbols_internal {
             dsemit ")";
             $dsindentlevel--;
         }
-        dsemit ";\n\n";
-        return;
     } elsif ($type == VALUETYPE) {
         dsdent;
         if ($arg[0]) {          # `abstract' flag
@@ -1985,13 +2000,13 @@ sub dump_symbols_internal {
             if (@{$ancestors_ref}) {
                 dsemit ": ";
                 my $first = 1;
-                foreach $ancref (@{$ancestors_ref}) {
+                foreach (@{$ancestors_ref}) {
                     if ($first) {
                         $first = 0;
                     } else {
                         dsemit ", ";
                     }
-                    my @ancnode = @{$ancref};
+                    my @ancnode = @{$_};
                     dsemit $ancnode[NAME];
                 }
                 dsemit ' ';
@@ -1999,6 +2014,7 @@ sub dump_symbols_internal {
         }
         dsemit "{\n";
         $dsindentlevel++;
+        my $memberinfo;  # "use strict" wants it
         foreach $memberinfo (@{$arg[2]}) {
             my ($memberkind, $member) = @{$memberinfo};
             my @member = @{$member};
@@ -2025,6 +2041,7 @@ sub dump_symbols_internal {
                 dsdent dstypeof(shift @subord);
                 dsemit " $mname (";
                 my $first = 1;
+                my $param;  # "use strict" wants it
                 foreach $param (@arg) {
                     my $m = $$param[MODE];
                     if ($first) {
@@ -2039,17 +2056,19 @@ sub dump_symbols_internal {
             }
         }
         $dsindentlevel--;
-        dsdent "};\n\n";
-        return;
+        dsdent "}";
     } elsif ($type == MODULE || $type == INTERFACE) {
         push @dscopes, $name;
+        dsdent;
         if ($type == INTERFACE && $arg[1]) {
             dsemit "abstract ";
         }
-        dsdent($predef_types[$type] . " ");
+        dsemit($predef_types[$type] . " ");
         dsemit "$name ";
         if ($type == INTERFACE) {
-            my @ancestors = @{shift @arg};
+            my $ancref = shift @arg;
+            my @ancestors = @{$ancref};
+            shift @arg;  # discard the "abstract" flag
             if (@ancestors) {
                 dsemit ": ";
                 for ($i = 0; $i <= $#ancestors; $i++) {
@@ -2058,33 +2077,31 @@ sub dump_symbols_internal {
                     dsemit(", ") if ($i < $#ancestors);
                 }
             }
-            shift @arg;  # discard the "abstract" flag
         }
         dsemit " {\n\n";
         $dsindentlevel++;
-        foreach $component (@arg) {
-            dump_symbols_internal $component;
+        foreach (@arg) {
+            unless (dump_symbols_internal $_) {
+                $status = 0;
+            }
         }
         $dsindentlevel--;
-        dsdent "};\n\n";
+        dsdent "}";
         pop @dscopes;
-        return;
-    }
-    dsdent($predef_types[$type] . " ");
-    if ($type == TYPEDEF) {
+    } elsif ($type == TYPEDEF) {
         my $origtype = $arg[0];
         my $dimref = $arg[1];
-        dsemit(dstypeof($origtype) . " $name");
+        dsdent("typedef " . dstypeof($origtype) . " $name");
         if ($dimref and @{$dimref}) {
-            foreach $dim (@{$dimref}) {
-                dsemit "[$dim]";
+            foreach (@{$dimref}) {
+                dsemit "[$_]";
             }
         }
     } elsif ($type == CONST) {
-        dsemit(dstypeof($arg[0]) . " $name = ");
+        dsdent("const " . dstypeof($arg[0]) . " $name = ");
         dsemit join(' ', @{$arg[1]});
     } elsif ($type == ENUM) {
-        dsemit "$name { ";
+        dsdent "enum $name { ";
         if ($#arg > 4) {
             $dsindentlevel += 5;
             dsemit "\n";
@@ -2105,7 +2122,7 @@ sub dump_symbols_internal {
             dsemit " }";
         }
     } elsif ($type == STRUCT || $type == UNION || $type == EXCEPTION) {
-        dsemit $name;
+        dsdent($predef_types[$type] . " $name");
         if ($type == UNION) {
             dsemit(" switch (" . dstypeof(shift @arg) . ")");
         }
@@ -2124,16 +2141,16 @@ sub dump_symbols_internal {
                     $had_case = 1;
                 }
                 if ($type == CASE) {
-                    foreach $case (@{$suboref}) {
-                       dsdent "case $case:\n";
+                    foreach (@{$suboref}) {
+                       dsdent "case $_:\n";
                     }
                 } else {
                     dsdent "default:\n";
                 }
                 $dsindentlevel++;
             } else {
-                foreach $dim (@{$suboref}) {
-                    $name .= '[' . $dim . ']';
+                foreach (@{$suboref}) {
+                    $name .= '[' . $_ . ']';
                 }
                 dsdent(dstypeof($type) . " $name;\n");
             }
@@ -2141,18 +2158,20 @@ sub dump_symbols_internal {
         $dsindentlevel -= $had_case + 1;
         dsdent "}";
     } elsif ($type == INTERFACE_FWD) {
-        dsemit $name;
+        dsdent "interface $name";
     } else {
-        warn "Dump_Symbols: unknown type value $type\n";
+        warn("Dump_Symbols: unknown type " . dstypeof($type) . "\n");
+        $status = 0;
     }
     dsemit ";\n\n";
+    $status
 }
 
 
 sub Dump_Symbols {
     my $sym_array_ref = shift;
     $dsymroot = $sym_array_ref;
-    dump_symbols_internal $sym_array_ref;
+    dump_symbols_internal $sym_array_ref
 }
 
 
@@ -2168,8 +2187,8 @@ sub traverse {
         &{$user_sub_ref}($symroot, $scope, $inside_includefile);
         return;
     } elsif (not isnode $symroot) {
-        foreach $decl (@{$symroot}) {
-            traverse($decl, $scope, $inside_includefile);
+        foreach (@{$symroot}) {
+            traverse($_, $scope, $inside_includefile);
         }
         return;
     }
@@ -2187,8 +2206,8 @@ sub traverse {
         } else {
             $scope = $name;
         }
-        foreach $decl (@arg) {
-            traverse($decl, $scope, $inside_includefile);
+        foreach (@arg) {
+            traverse($_, $scope, $inside_includefile);
         }
     } elsif ($type == INTERFACE) {
         # my @ancestors = @{$arg[0]};
@@ -2204,8 +2223,8 @@ sub traverse {
         } else {
             $scope = $name;
         }
-        foreach $decl (@arg) {
-            traverse($decl, $scope, $inside_includefile);
+        foreach (@arg) {
+            traverse($_, $scope, $inside_includefile);
         }
     }
 }
